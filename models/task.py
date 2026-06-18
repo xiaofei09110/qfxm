@@ -23,4 +23,5 @@ class Task(SQLModel, table=True):
     next_run: Optional[datetime] = None
     run_count: int = Field(default=0)
     fail_count: int = Field(default=0)
+    last_error: Optional[str] = None   # 最近一次失败的原因
     created_at: datetime = Field(default_factory=datetime.now)

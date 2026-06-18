@@ -108,9 +108,13 @@ class CleanWorker(QThread):
 
 class RefreshWorker(QThread):
     finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
 
     def run(self):
-        self.finished.emit(list_accounts())
+        try:
+            self.finished.emit(list_accounts())
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class DeleteWorker(QThread):
@@ -253,9 +257,11 @@ class AccountTab(QWidget):
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
             return
-        self._refresh_worker = RefreshWorker()
-        self._refresh_worker.finished.connect(self._populate_table)
-        self._refresh_worker.start()
+        worker = RefreshWorker()
+        worker.finished.connect(self._populate_table)
+        worker.error.connect(lambda e: self.status_label.setText(f"刷新失败: {e}"))
+        self._refresh_worker = worker
+        worker.start()
 
     def _populate_table(self, accounts):
         self._accounts = accounts

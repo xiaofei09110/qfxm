@@ -76,9 +76,13 @@ class TaskWorker(QThread):
 
 class RefreshWorker(QThread):
     finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
 
     def run(self):
-        self.finished.emit(list_tasks())
+        try:
+            self.finished.emit(list_tasks())
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class BatchCreateWorker(QThread):
@@ -484,9 +488,9 @@ class TaskTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
-            "ID", "名称", "账号ID", "群组ID", "执行计划", "状态", "下次执行", "执行/失败"
+            "ID", "名称", "账号ID", "群组ID", "执行计划", "状态", "下次执行", "执行/失败", "最近错误"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -502,9 +506,11 @@ class TaskTab(QWidget):
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
             return
-        self._refresh_worker = RefreshWorker()
-        self._refresh_worker.finished.connect(self._populate_table)
-        self._refresh_worker.start()
+        worker = RefreshWorker()
+        worker.finished.connect(self._populate_table)
+        worker.error.connect(lambda e: self.status_label.setText(f"刷新失败: {e}"))
+        self._refresh_worker = worker
+        worker.start()
 
     def _populate_table(self, tasks):
         self._tasks = {t.id: t for t in tasks}
@@ -535,6 +541,12 @@ class TaskTab(QWidget):
             self.table.setItem(row, 7, QTableWidgetItem(
                 f"{task.run_count}/{task.fail_count}"
             ))
+
+            last_error = getattr(task, "last_error", None) or ""
+            err_item = QTableWidgetItem(last_error)
+            if last_error:
+                err_item.setForeground(QColor("#F44336"))
+            self.table.setItem(row, 8, err_item)
 
     def _set_buttons(self, enabled: bool):
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle, self.btn_delete]:

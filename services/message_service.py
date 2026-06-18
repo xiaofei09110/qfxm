@@ -102,14 +102,17 @@ def execute_task(task_id: int):
             run_async(safe_send(client, chat_peer, task.message_text, task.media_path), timeout=300)
             task.run_count += 1
             task.last_run = datetime.now()
+            task.last_error = None
             logger.info("任务 %d 执行成功，发送至 %s", task_id, chat_peer)
         except NeedsVerificationError:
             group.needs_verify = True
             db.add(group)
             task.fail_count += 1
+            task.last_error = "群组需要人机验证（用手机打开 Telegram 完成验证）"
             logger.warning("任务 %d：群 %s 需要人机验证", task_id, group.tg_id)
         except Exception as e:
             task.fail_count += 1
+            task.last_error = str(e)
             logger.error("任务 %d 失败: %s", task_id, e)
         finally:
             db.add(task)
