@@ -1,0 +1,29 @@
+# 数据库（每台机器独立）
+qfxm.db
+*.db
+
+# Session 文件（敏感，单独管理）
+sessions/
+
+# 日志
+logs/
+
+# 环境变量（含密钥）
+.env
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp

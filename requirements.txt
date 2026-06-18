@@ -1,0 +1,9 @@
+telethon==1.36.0
+apscheduler==3.10.4
+SQLAlchemy>=2.0.36
+sqlmodel>=0.0.21
+PyQt5==5.15.10
+Pillow>=10.4.0
+python-dotenv==1.0.0
+aiofiles==23.2.1
+pytz==2023.3
