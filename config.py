@@ -11,5 +11,9 @@ SEND_DELAY_MIN = float(os.getenv("SEND_DELAY_MIN", "3"))
 SEND_DELAY_MAX = float(os.getenv("SEND_DELAY_MAX", "15"))
 SESSIONS_DIR = os.getenv("SESSIONS_DIR", "sessions")
 
+# 远程模式配置（客户端填写，服务端留空）
+SERVER_URL = os.getenv("SERVER_URL", "").rstrip("/")   # 如 http://43.165.173.63:8000
+API_KEY    = os.getenv("API_KEY", "qfxm-change-this-key")
+
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs("logs", exist_ok=True)

@@ -1,6 +1,6 @@
 """
 group_tab.py
-群组管理界面：添加群组、查看发言状态、人机验证提示。
+群组管理界面。
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QColor
 
-from services.group_service import add_group, list_groups, resolve_group_info
-from services.account_service import list_accounts
+from services.proxy import list_groups, resolve_group_info, add_group
+from services.proxy import list_accounts
 
 
 class AddGroupDialog(QDialog):
@@ -30,7 +30,7 @@ class AddGroupDialog(QDialog):
         layout.addRow("使用账号:", self.account_combo)
         layout.addRow("群组:", self.group_input)
 
-        hint = QLabel("输入群组 @username 或数字 ID（负数），程序会自动获取群组信息")
+        hint = QLabel("输入群组 @username 或数字 ID，程序会自动获取群组信息")
         hint.setStyleSheet("color: gray; font-size: 11px;")
         layout.addRow(hint)
 
@@ -41,7 +41,7 @@ class AddGroupDialog(QDialog):
 
     def get_values(self):
         return {
-            "account_id": self.account_combo.currentData(),
+            "account_id":  self.account_combo.currentData(),
             "group_input": self.group_input.text().strip(),
         }
 
@@ -56,7 +56,7 @@ class GroupTab(QWidget):
         layout = QVBoxLayout(self)
 
         btn_row = QHBoxLayout()
-        self.btn_add = QPushButton("添加群组")
+        self.btn_add     = QPushButton("添加群组")
         self.btn_refresh = QPushButton("刷新")
         for btn in [self.btn_add, self.btn_refresh]:
             btn_row.addWidget(btn)
@@ -64,12 +64,16 @@ class GroupTab(QWidget):
         layout.addLayout(btn_row)
 
         self.verify_banner = QLabel("")
-        self.verify_banner.setStyleSheet("background: #FFF3CD; color: #856404; padding: 8px; border-radius: 4px;")
+        self.verify_banner.setStyleSheet(
+            "background: #FFF3CD; color: #856404; padding: 8px; border-radius: 4px;"
+        )
         self.verify_banner.setVisible(False)
         layout.addWidget(self.verify_banner)
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["ID", "群组ID", "用户名", "标题", "能否发言", "需要验证"])
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "群组ID", "用户名", "标题", "能否发言", "需要验证"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -81,27 +85,27 @@ class GroupTab(QWidget):
     def refresh_table(self):
         groups = list_groups()
         self.table.setRowCount(len(groups))
-        needs_verify_groups = []
+        needs_verify = []
         for row, grp in enumerate(groups):
             self.table.setItem(row, 0, QTableWidgetItem(str(grp.id)))
             self.table.setItem(row, 1, QTableWidgetItem(grp.tg_id))
             self.table.setItem(row, 2, QTableWidgetItem(grp.username or ""))
             self.table.setItem(row, 3, QTableWidgetItem(grp.title or ""))
 
-            can_send_item = QTableWidgetItem("是" if grp.can_send else "否")
-            can_send_item.setForeground(QColor("#4CAF50" if grp.can_send else "#F44336"))
-            self.table.setItem(row, 4, can_send_item)
+            can_item = QTableWidgetItem("是" if grp.can_send else "否")
+            can_item.setForeground(QColor("#4CAF50" if grp.can_send else "#F44336"))
+            self.table.setItem(row, 4, can_item)
 
-            verify_item = QTableWidgetItem("需要验证" if grp.needs_verify else "正常")
+            v_item = QTableWidgetItem("需要验证" if grp.needs_verify else "正常")
             if grp.needs_verify:
-                verify_item.setForeground(QColor("#FF9800"))
-                needs_verify_groups.append(grp.title or grp.tg_id)
-            self.table.setItem(row, 5, verify_item)
+                v_item.setForeground(QColor("#FF9800"))
+                needs_verify.append(grp.title or grp.tg_id)
+            self.table.setItem(row, 5, v_item)
 
-        if needs_verify_groups:
-            names = "、".join(needs_verify_groups[:3])
+        if needs_verify:
+            names = "、".join(needs_verify[:3])
             self.verify_banner.setText(
-                f"⚠ 以下群组需要人机验证（用手机打开 Telegram，手动完成验证后点刷新）：{names}"
+                f"⚠ 以下群组需要人机验证（用手机打开 Telegram 完成验证后点刷新）：{names}"
             )
             self.verify_banner.setVisible(True)
         else:
@@ -118,7 +122,9 @@ class GroupTab(QWidget):
 
         info = resolve_group_info(vals["account_id"], vals["group_input"])
         if not info:
-            QMessageBox.critical(self, "错误", "无法获取群组信息，请确认账号已连接且群组 ID/用户名正确")
+            QMessageBox.critical(
+                self, "错误", "无法获取群组信息，请确认账号已验证且群组 ID/用户名正确"
+            )
             return
 
         add_group(

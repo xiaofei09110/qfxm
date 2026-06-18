@@ -1,17 +1,15 @@
 """
 main_window.py
-PyQt5 主窗口，包含三个 Tab：账号管理、群组管理、定时任务。
+PyQt5 主窗口。本地模式显示本地调度器状态；远程模式显示服务器状态。
 """
 import logging
-from PyQt5.QtWidgets import (
-    QMainWindow, QTabWidget, QStatusBar, QLabel, QAction, QMenuBar,
-)
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import QMainWindow, QTabWidget, QStatusBar, QLabel, QAction
+from PyQt5.QtCore import QTimer
 
 from gui.tabs.account_tab import AccountTab
 from gui.tabs.group_tab import GroupTab
 from gui.tabs.task_tab import TaskTab
-import core.scheduler as scheduler
+from config import SERVER_URL
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,6 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         self._build_statusbar()
 
-        # 每30秒刷新任务Tab（更新下次执行时间显示）
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_timer)
         self._timer.start(30_000)
@@ -34,7 +31,6 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("文件")
-
         exit_action = QAction("退出", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
@@ -47,37 +43,58 @@ class MainWindow(QMainWindow):
     def _build_tabs(self):
         self.tabs = QTabWidget()
         self.account_tab = AccountTab()
-        self.group_tab = GroupTab()
-        self.task_tab = TaskTab()
-
+        self.group_tab   = GroupTab()
+        self.task_tab    = TaskTab()
         self.tabs.addTab(self.account_tab, "账号管理")
-        self.tabs.addTab(self.group_tab, "群组管理")
-        self.tabs.addTab(self.task_tab, "定时任务")
+        self.tabs.addTab(self.group_tab,   "群组管理")
+        self.tabs.addTab(self.task_tab,    "定时任务")
         self.setCentralWidget(self.tabs)
 
     def _build_statusbar(self):
         self.statusBar().showMessage("就绪")
-        self._scheduler_label = QLabel("调度器: 运行中")
-        self.statusBar().addPermanentWidget(self._scheduler_label)
+        self._server_label = QLabel()
+        self.statusBar().addPermanentWidget(self._server_label)
+        self._update_server_label()
+
+    def _update_server_label(self):
+        if SERVER_URL:
+            try:
+                from api_client import get_server_job_count
+                jobs = get_server_job_count()
+                if jobs >= 0:
+                    self._server_label.setText(f"服务器模式 | 活跃任务: {jobs}")
+                    self._server_label.setStyleSheet("color: #4CAF50;")
+                else:
+                    self._server_label.setText("服务器模式 | 连接失败")
+                    self._server_label.setStyleSheet("color: #F44336;")
+            except Exception:
+                self._server_label.setText("服务器模式 | 连接失败")
+                self._server_label.setStyleSheet("color: #F44336;")
+        else:
+            import core.scheduler as scheduler
+            if scheduler._scheduler.running:
+                jobs = len(scheduler.list_jobs())
+                self._server_label.setText(f"本地模式 | 活跃任务: {jobs}")
+                self._server_label.setStyleSheet("")
+            else:
+                self._server_label.setText("本地模式 | 调度器已停止")
+                self._server_label.setStyleSheet("color: #F44336;")
 
     def _on_timer(self):
-        if scheduler._scheduler.running:
-            jobs = len(scheduler.list_jobs())
-            self._scheduler_label.setText(f"调度器: 运行中 | 活跃任务: {jobs}")
-        else:
-            self._scheduler_label.setText("调度器: 已停止")
-        # 刷新任务列表的下次执行时间
+        self._update_server_label()
         self.task_tab.refresh_table()
 
     def _open_dev_doc(self):
-        import os, subprocess
+        import os
         doc_path = os.path.abspath("DEVELOPMENT.md")
         if os.path.exists(doc_path):
             os.startfile(doc_path)
 
     def closeEvent(self, event):
-        scheduler.stop()
-        from core.client_manager import client_manager
-        client_manager.disconnect_all()
+        if not SERVER_URL:
+            import core.scheduler as scheduler
+            scheduler.stop()
+            from core.client_manager import client_manager
+            client_manager.disconnect_all()
         logger.info("程序正常退出")
         event.accept()

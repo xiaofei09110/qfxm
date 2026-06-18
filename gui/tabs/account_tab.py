@@ -1,9 +1,6 @@
 """
 account_tab.py
-账号管理界面。
-支持两种导入方式：
-  1. 选择父文件夹（如 D:\桌面\协议号\）→ 自动扫描全部协议号
-  2. 选择单个/多个协议号文件夹 → 逐个导入
+账号管理界面。本地模式和远程模式均通过 services.proxy 统一调用。
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
@@ -13,13 +10,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
-from services.account_service import (
+from services.proxy import (
     import_from_parent_folder, import_from_folders,
     batch_check_status, list_accounts, delete_account,
+    batch_update_profiles_gui,
 )
-from core.client_manager import client_manager
-from core.profile_manager import batch_update_profiles
-
 
 STATUS_COLORS = {
     "active":      "#4CAF50",
@@ -67,8 +62,8 @@ class ProfileDialog(QDialog):
         layout = QFormLayout(self)
 
         self.first_name = QLineEdit()
-        self.last_name = QLineEdit()
-        self.bio = QLineEdit()
+        self.last_name  = QLineEdit()
+        self.bio        = QLineEdit()
         self.photo_path = QLineEdit()
         photo_btn = QPushButton("选择图片")
         photo_btn.clicked.connect(self._pick_photo)
@@ -99,9 +94,9 @@ class ProfileDialog(QDialog):
     def get_values(self):
         return {
             "first_name": self.first_name.text().strip() or None,
-            "last_name": self.last_name.text().strip() or None,
-            "bio": self.bio.text().strip() or None,
-            "photo_path": self.photo_path.text().strip() or None,
+            "last_name":  self.last_name.text().strip()  or None,
+            "bio":        self.bio.text().strip()         or None,
+            "photo_path": self.photo_path.text().strip()  or None,
         }
 
 
@@ -114,29 +109,27 @@ class AccountTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # 导入区域
         import_label = QLabel("导入协议号：")
         import_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(import_label)
 
         import_row = QHBoxLayout()
         self.btn_import_folder = QPushButton("选择整个协议号文件夹（推荐）")
-        self.btn_import_folder.setToolTip("选择包含所有协议号子文件夹的父目录，如 D:\\桌面\\协议号\\")
+        self.btn_import_folder.setToolTip("选择包含所有协议号子文件夹的父目录")
         self.btn_import_single = QPushButton("选择单个/多个协议号")
-        self.btn_import_single.setToolTip("手动选择一个或多个以手机号命名的文件夹")
         import_row.addWidget(self.btn_import_folder)
         import_row.addWidget(self.btn_import_single)
         import_row.addStretch()
         layout.addLayout(import_row)
 
-        # 操作区域
         btn_row = QHBoxLayout()
         self.btn_check_selected = QPushButton("验证选中账号")
-        self.btn_check_all = QPushButton("验证全部账号")
-        self.btn_profile = QPushButton("批量改资料")
-        self.btn_delete = QPushButton("删除选中")
-        self.btn_refresh = QPushButton("刷新列表")
-        for btn in [self.btn_check_selected, self.btn_check_all,
+        self.btn_check_all      = QPushButton("验证全部账号")
+        self.btn_clean          = QPushButton("清理失效账号")
+        self.btn_profile        = QPushButton("批量改资料")
+        self.btn_delete         = QPushButton("删除选中")
+        self.btn_refresh        = QPushButton("刷新列表")
+        for btn in [self.btn_check_selected, self.btn_check_all, self.btn_clean,
                     self.btn_profile, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
@@ -149,7 +142,6 @@ class AccountTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-        # 表格
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
             "ID", "手机号", "名字", "状态", "SpamBlock", "2FA", "Premium", "最后检测"
@@ -159,11 +151,11 @@ class AccountTab(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
-        # 信号连接
         self.btn_import_folder.clicked.connect(self._on_import_folder)
         self.btn_import_single.clicked.connect(self._on_import_single)
         self.btn_check_selected.clicked.connect(self._on_check_selected)
         self.btn_check_all.clicked.connect(self._on_check_all)
+        self.btn_clean.clicked.connect(self._on_clean)
         self.btn_profile.clicked.connect(self._on_profile)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
@@ -195,7 +187,6 @@ class AccountTab(QWidget):
             self.table.setItem(row, 7, QTableWidgetItem(checked))
 
     def _on_import_folder(self):
-        """选择整个父文件夹，自动扫描所有协议号。"""
         parent = QFileDialog.getExistingDirectory(self, "选择协议号父文件夹")
         if not parent:
             return
@@ -204,8 +195,6 @@ class AccountTab(QWidget):
         self._show_import_result(results)
 
     def _on_import_single(self):
-        """手动多选单个协议号文件夹。"""
-        # PyQt5 没有直接支持多选文件夹，用循环让用户多次选择
         folders = []
         while True:
             folder = QFileDialog.getExistingDirectory(
@@ -214,7 +203,6 @@ class AccountTab(QWidget):
             if not folder:
                 break
             folders.append(folder)
-
         if not folders:
             return
         self.status_label.setText("导入中，请稍候...")
@@ -222,15 +210,15 @@ class AccountTab(QWidget):
         self._show_import_result(results)
 
     def _show_import_result(self, results):
-        ok = sum(1 for r in results if r["status"] == "ok")
-        skipped = sum(1 for r in results if r["status"] == "skipped")
-        failed = sum(1 for r in results if r["status"] == "failed")
+        ok      = sum(1 for r in results if r.get("status") == "ok")
+        skipped = sum(1 for r in results if r.get("status") == "skipped")
+        failed  = sum(1 for r in results if r.get("status") == "failed")
         self.status_label.setText(
             f"导入完成：成功 {ok} 个，跳过 {skipped} 个（已存在），失败 {failed} 个"
         )
         if failed:
             fail_msgs = [f"{r.get('phone','?')}: {r.get('reason','')}"
-                         for r in results if r["status"] == "failed"]
+                         for r in results if r.get("status") == "failed"]
             QMessageBox.warning(self, "部分导入失败", "\n".join(fail_msgs[:10]))
         self.refresh_table()
 
@@ -269,9 +257,25 @@ class AccountTab(QWidget):
         self.btn_check_all.setEnabled(True)
         accounts = list_accounts()
         active = sum(1 for a in accounts if a.status == "active")
-        self.status_label.setText(
-            f"验证完成：{active}/{len(accounts)} 个账号正常"
+        self.status_label.setText(f"验证完成：{active}/{len(accounts)} 个账号正常")
+        self.refresh_table()
+
+    def _on_clean(self):
+        """一键删除失效/封号账号，保留正常账号。"""
+        accounts = list_accounts()
+        to_delete = [a for a in accounts if a.status in ("invalid", "banned")]
+        if not to_delete:
+            QMessageBox.information(self, "提示", "没有需要清理的失效/封号账号")
+            return
+        reply = QMessageBox.question(
+            self, "确认清理",
+            f"将删除 {len(to_delete)} 个失效/封号账号，保留其余 {len(accounts)-len(to_delete)} 个。\n确认继续？"
         )
+        if reply != QMessageBox.Yes:
+            return
+        for acc in to_delete:
+            delete_account(acc.id)
+        self.status_label.setText(f"已清理 {len(to_delete)} 个失效/封号账号")
         self.refresh_table()
 
     def _on_profile(self):
@@ -286,23 +290,23 @@ class AccountTab(QWidget):
         if not any(vals.values()):
             QMessageBox.information(self, "提示", "没有填写任何修改内容")
             return
-
-        clients = [(aid, client_manager.get_client(aid))
-                   for aid in selected_ids if client_manager.get_client(aid)]
-        if not clients:
-            QMessageBox.warning(self, "提示", "选中账号均未连接，请先点「批量验证状态」")
-            return
-
-        from core.client_manager import run_async
-        results = run_async(batch_update_profiles(clients, **vals))
-        success = sum(1 for v in results.values() if v)
-        self.status_label.setText(f"资料修改：{success}/{len(clients)} 个成功")
+        try:
+            results = batch_update_profiles_gui(selected_ids, **vals)
+            if not results:
+                QMessageBox.warning(self, "提示", "选中账号均未连接，请先点「验证账号」")
+                return
+            success = sum(1 for v in results.values() if v)
+            self.status_label.setText(f"资料修改：{success}/{len(selected_ids)} 个成功")
+        except Exception as e:
+            QMessageBox.critical(self, "修改失败", str(e))
 
     def _on_delete(self):
         ids = self._get_selected_ids()
         if not ids:
             return
-        reply = QMessageBox.question(self, "确认删除", f"确认从数据库删除 {len(ids)} 个账号记录？\n（不会删除 session 文件）")
+        reply = QMessageBox.question(
+            self, "确认删除", f"确认从数据库删除 {len(ids)} 个账号记录？\n（不会删除 session 文件）"
+        )
         if reply == QMessageBox.Yes:
             for aid in ids:
                 delete_account(aid)
