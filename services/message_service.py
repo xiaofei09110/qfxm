@@ -98,6 +98,7 @@ def execute_task(task_id: int):
         # 优先用 username 发送，避免 MemorySession 重启后正整数 ID 被 Telethon 误判为用户 ID
         chat_peer = group.username if group.username else int(group.tg_id)
 
+        auto_disable = False
         try:
             run_async(safe_send(client, chat_peer, task.message_text, task.media_path), timeout=300)
             task.run_count += 1
@@ -108,12 +109,21 @@ def execute_task(task_id: int):
             group.needs_verify = True
             db.add(group)
             task.fail_count += 1
+            task.is_active = False
             task.last_error = "群组需要人机验证（用手机打开 Telegram 完成验证）"
-            logger.warning("任务 %d：群 %s 需要人机验证", task_id, group.tg_id)
+            auto_disable = True
+            logger.warning("任务 %d 已自动停用：群 %s 需要人机验证", task_id, group.tg_id)
         except Exception as e:
             task.fail_count += 1
+            task.is_active = False
             task.last_error = str(e)
-            logger.error("任务 %d 失败: %s", task_id, e)
+            auto_disable = True
+            logger.error("任务 %d 失败已自动停用: %s", task_id, e)
         finally:
             db.add(task)
             db.commit()
+
+    if auto_disable:
+        import core.scheduler as scheduler
+        scheduler.remove_task(task_id)
+        logger.info("任务 %d 已从调度器移除", task_id)
