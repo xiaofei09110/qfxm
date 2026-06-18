@@ -182,6 +182,9 @@ def execute_task(task_id: int):
             task.run_count += 1
             task.last_run = datetime.now()
             task.last_error = None
+            if group.needs_verify:
+                group.needs_verify = False
+                db.add(group)
             logger.info("任务 %d 执行成功，发送至 %s", task_id, chat_peer)
         except NeedsVerificationError:
             group.needs_verify = True

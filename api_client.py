@@ -175,6 +175,10 @@ def list_groups() -> List[SimpleNamespace]:
     return [_group(d) for d in _get("/groups")]
 
 
+def clear_group_verify(group_id: int):
+    _put(f"/groups/{group_id}/clear_verify")
+
+
 def resolve_group_info(account_id: int, group_input: str) -> Optional[dict]:
     try:
         return _post("/groups/resolve", json={

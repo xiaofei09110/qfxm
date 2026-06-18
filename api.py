@@ -205,6 +205,21 @@ def save_group(req: SaveGroupRequest, _=Depends(_auth)):
     return jsonable_encoder(group)
 
 
+@app.put("/groups/{group_id}/clear_verify", dependencies=[Depends(_auth)])
+def clear_verify_ep(group_id: int):
+    """手动清除群组的 needs_verify 标记。"""
+    from database import get_session
+    from models.group import Group
+    with get_session() as db:
+        group = db.get(Group, group_id)
+        if not group:
+            raise HTTPException(404, "群组不存在")
+        group.needs_verify = False
+        db.add(group)
+        db.commit()
+    return {"ok": True}
+
+
 @app.delete("/groups/{group_id}", dependencies=[Depends(_auth)])
 def remove_group(group_id: int):
     from services.group_service import delete_group

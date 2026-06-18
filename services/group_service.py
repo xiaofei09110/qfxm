@@ -82,6 +82,15 @@ def list_groups() -> List[Group]:
         return db.exec(select(Group)).all()
 
 
+def clear_group_verify(group_id: int):
+    with get_session() as db:
+        group = db.get(Group, group_id)
+        if group:
+            group.needs_verify = False
+            db.add(group)
+            db.commit()
+
+
 def create_task(
     account_id: int,
     group_id: int,

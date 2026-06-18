@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit
 
 from services.proxy import (
     list_groups, resolve_group_info, add_group, list_accounts,
-    delete_group, verify_group_join,
+    delete_group, verify_group_join, clear_group_verify,
 )
 
 
@@ -26,6 +26,22 @@ class RefreshWorker(QThread):
             self.finished.emit(list_groups())
         except Exception as e:
             self.error.emit(str(e))
+
+
+class ClearVerifyWorker(QThread):
+    finished = pyqtSignal()
+
+    def __init__(self, ids):
+        super().__init__()
+        self.ids = ids
+
+    def run(self):
+        for gid in self.ids:
+            try:
+                clear_group_verify(gid)
+            except Exception:
+                pass
+        self.finished.emit()
 
 
 class DeleteGroupWorker(QThread):
@@ -133,10 +149,12 @@ class GroupTab(QWidget):
         layout = QVBoxLayout(self)
 
         btn_row = QHBoxLayout()
-        self.btn_add     = QPushButton("添加群组")
-        self.btn_delete  = QPushButton("删除选中")
-        self.btn_refresh = QPushButton("刷新")
-        for btn in [self.btn_add, self.btn_delete, self.btn_refresh]:
+        self.btn_add          = QPushButton("添加群组")
+        self.btn_delete       = QPushButton("删除选中")
+        self.btn_clear_verify = QPushButton("清除验证标记")
+        self.btn_refresh      = QPushButton("刷新")
+        self.btn_clear_verify.setToolTip("将选中群组的「需要验证」状态手动清除为正常")
+        for btn in [self.btn_add, self.btn_delete, self.btn_clear_verify, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -171,6 +189,7 @@ class GroupTab(QWidget):
 
         self.btn_add.clicked.connect(self._on_add)
         self.btn_delete.clicked.connect(self._on_delete)
+        self.btn_clear_verify.clicked.connect(self._on_clear_verify)
         self.btn_refresh.clicked.connect(self.refresh_table)
 
     def refresh_table(self):
@@ -301,4 +320,21 @@ class GroupTab(QWidget):
     def _on_delete_done(self):
         self.btn_delete.setEnabled(True)
         self.status_label.setText("删除完成")
+        self.refresh_table()
+
+    def _on_clear_verify(self):
+        rows = set(idx.row() for idx in self.table.selectedIndexes())
+        if not rows:
+            self.status_label.setText("请先选中群组行")
+            return
+        ids = [int(self.table.item(r, 0).text()) for r in rows if self.table.item(r, 0)]
+        self.btn_clear_verify.setEnabled(False)
+        self.status_label.setText(f"正在清除 {len(ids)} 个群组的验证标记...")
+        self._clear_verify_worker = ClearVerifyWorker(ids)
+        self._clear_verify_worker.finished.connect(self._on_clear_verify_done)
+        self._clear_verify_worker.start()
+
+    def _on_clear_verify_done(self):
+        self.btn_clear_verify.setEnabled(True)
+        self.status_label.setText("验证标记已清除")
         self.refresh_table()
