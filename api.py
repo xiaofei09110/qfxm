@@ -101,6 +101,14 @@ def remove_account(account_id: int, _=Depends(_auth)):
     return {"ok": True}
 
 
+@app.post("/accounts/{account_id}/verify")
+def spambot_verify_ep(account_id: int, _=Depends(_auth)):
+    """让账号自动与 @SpamBot 交互完成申诉流程。"""
+    from services.verification_service import verify_account
+    result = verify_account(account_id)
+    return {"message": result}
+
+
 class ProfileRequest(BaseModel):
     account_ids: List[int]
     first_name: Optional[str] = None

@@ -129,6 +129,11 @@ def batch_check_status(account_ids: List[int]) -> List[Tuple[int, str]]:
     return results
 
 
+def verify_account_spambot(account_id: int) -> str:
+    data = _post(f"/accounts/{account_id}/verify")
+    return data.get("message", "")
+
+
 def delete_account(account_id: int):
     _delete(f"/accounts/{account_id}")
 

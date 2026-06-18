@@ -13,7 +13,7 @@ from PyQt5.QtGui import QColor
 from services.proxy import (
     import_from_parent_folder, import_from_folders,
     batch_check_status, list_accounts, delete_account,
-    batch_update_profiles_gui,
+    batch_update_profiles_gui, verify_account_spambot,
 )
 
 STATUS_COLORS = {
@@ -147,6 +147,25 @@ class ProfileWorker(QThread):
             self.error.emit(str(e))
 
 
+class VerifyWorker(QThread):
+    """依次对每个账号执行 SpamBot 申诉，逐条汇报结果。"""
+    progress = pyqtSignal(str)   # 单条结果（账号 + 结果文本）
+    finished = pyqtSignal()
+
+    def __init__(self, account_ids: list):
+        super().__init__()
+        self.account_ids = account_ids
+
+    def run(self):
+        for aid in self.account_ids:
+            try:
+                result = verify_account_spambot(aid)
+            except Exception as e:
+                result = f"出错: {e}"
+            self.progress.emit(f"账号 {aid}：\n{result}")
+        self.finished.emit()
+
+
 class ProfileDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -221,10 +240,12 @@ class AccountTab(QWidget):
         self.btn_check_all      = QPushButton("验证全部账号")
         self.btn_clean          = QPushButton("清理失效账号")
         self.btn_profile        = QPushButton("批量改资料")
+        self.btn_spambot        = QPushButton("SpamBot 申诉")
+        self.btn_spambot.setToolTip("自动与 @SpamBot 交互，为选中账号提交申诉解除限制")
         self.btn_delete         = QPushButton("删除选中")
         self.btn_refresh        = QPushButton("刷新列表")
         for btn in [self.btn_check_selected, self.btn_check_all, self.btn_clean,
-                    self.btn_profile, self.btn_delete, self.btn_refresh]:
+                    self.btn_profile, self.btn_spambot, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -251,6 +272,7 @@ class AccountTab(QWidget):
         self.btn_check_all.clicked.connect(self._on_check_all)
         self.btn_clean.clicked.connect(self._on_clean)
         self.btn_profile.clicked.connect(self._on_profile)
+        self.btn_spambot.clicked.connect(self._on_spambot)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
 
@@ -454,6 +476,48 @@ class AccountTab(QWidget):
             return
         success = sum(1 for v in results.values() if v)
         self.status_label.setText(f"资料修改：{success}/{total} 个成功")
+
+    def _on_spambot(self):
+        ids = self._get_selected_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选中要申诉的账号行（可 Ctrl 多选）")
+            return
+        reply = QMessageBox.question(
+            self, "SpamBot 申诉",
+            f"将对 {len(ids)} 个账号自动联系 @SpamBot 提交申诉。\n"
+            "每个账号约需 10-30 秒，申诉后 Telegram 会在数小时内处理。\n\n确认开始？"
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.btn_spambot.setEnabled(False)
+        self.status_label.setText(f"正在对 {len(ids)} 个账号提交 SpamBot 申诉...")
+
+        # 弹出结果窗口，逐条追加
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit
+        self._verify_dlg = QDialog(self)
+        self._verify_dlg.setWindowTitle("SpamBot 申诉进度")
+        self._verify_dlg.setMinimumSize(520, 380)
+        dlg_layout = QVBoxLayout(self._verify_dlg)
+        self._verify_log = QTextEdit()
+        self._verify_log.setReadOnly(True)
+        self._verify_log.setStyleSheet("font-family: monospace; font-size: 12px;")
+        dlg_layout.addWidget(self._verify_log)
+        self._verify_dlg.show()
+
+        self._verify_worker = VerifyWorker(ids)
+        self._verify_worker.progress.connect(self._on_verify_progress)
+        self._verify_worker.finished.connect(self._on_verify_done)
+        self._verify_worker.start()
+
+    def _on_verify_progress(self, msg: str):
+        self._verify_log.append(msg)
+        self._verify_log.append("─" * 40)
+
+    def _on_verify_done(self):
+        self.btn_spambot.setEnabled(True)
+        self.status_label.setText("SpamBot 申诉完成，请等待 Telegram 处理后重新验证账号状态")
+        self._verify_log.append("\n✅ 所有账号申诉流程已完成。")
 
     def _on_delete(self):
         ids = self._get_selected_ids()

@@ -15,6 +15,7 @@ if IS_REMOTE:
         import_from_parent_folder,
         import_from_folders,
         batch_check_status,
+        verify_account_spambot,
         delete_account,
         list_groups,
         resolve_group_info,
@@ -40,6 +41,7 @@ else:
         batch_check_status,
         delete_account,
     )
+    from services.verification_service import verify_account as verify_account_spambot  # noqa
     from services.group_service import (         # noqa
         list_groups,
         add_group,
