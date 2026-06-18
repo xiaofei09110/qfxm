@@ -321,8 +321,10 @@ class AccountTab(QWidget):
         ids = [a.id for a in list_accounts()]
         self._start_check(ids)
 
-    def _on_check_progress(self, account_id, status):
-        self.progress_bar.setValue(self.progress_bar.value() + 1)
+    def _on_check_progress(self, current, total, status):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.status_label.setText(f"正在验证 {current}/{total}...")
 
     def _on_check_done(self):
         self.progress_bar.setVisible(False)
