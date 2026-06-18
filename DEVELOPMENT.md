@@ -308,10 +308,35 @@ sudo journalctl -u qfxm -f     # 实时查看日志
 
 ## 十、代码更新流程
 
-本地修改代码后，推送到 GitHub，服务器拉取并重启：
+### 方式一：自动同步（推荐，日常开发使用）
+
+项目内有 `dev_watch.py`，监听本地文件改动，自动完成 git push + 服务器部署。
+
+**启动方式**：在 VSCode 按 `Ctrl + `` 打开终端，运行：
+
+```
+python dev_watch.py
+```
+
+**工作原理**：
+1. 监听 `d:\桌面\qfxm\` 目录下所有文件变动（忽略 `.git`、`logs`、`sessions`、`.env`、`.pyc`）
+2. 最后一次改动 5 秒后触发（防抖，避免频繁提交）
+3. 自动执行 `git add -A && git commit && git push`
+4. SSH 连接服务器执行 `git pull && sudo systemctl restart qfxm`
+
+**依赖配置**（`.env` 中填写）：
+
+```env
+SSH_HOST=43.165.173.63
+SSH_USER=ubuntu
+SSH_PASSWORD=服务器登录密码
+SSH_KEY_PATH=        # 或填私钥路径，与 SSH_PASSWORD 二选一
+```
+
+### 方式二：手动更新
 
 ```bash
-# 本地（Windows）
+# 本地（Windows VSCode 终端）
 git add .
 git commit -m "修复说明"
 git push
