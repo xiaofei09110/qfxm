@@ -58,9 +58,13 @@ class MainWindow(QMainWindow):
 
     def _build_statusbar(self):
         self.statusBar().showMessage("就绪")
+        self._refresh_label = QLabel()
+        self._refresh_label.setStyleSheet("color: #888; padding-right: 16px;")
+        self.statusBar().addPermanentWidget(self._refresh_label)
         self._server_label = QLabel()
         self.statusBar().addPermanentWidget(self._server_label)
         self._update_server_label()
+        self._update_refresh_label()
 
     def _update_server_label(self):
         if SERVER_URL:
@@ -86,9 +90,14 @@ class MainWindow(QMainWindow):
                 self._server_label.setText("本地模式 | 调度器已停止")
                 self._server_label.setStyleSheet("color: #F44336;")
 
+    def _update_refresh_label(self):
+        from datetime import datetime
+        self._refresh_label.setText(f"数据更新: {datetime.now().strftime('%H:%M:%S')}")
+
     def _on_timer(self):
         self._update_server_label()
         self.task_tab.refresh_table()
+        self._update_refresh_label()
 
     def _reload_tabs(self):
         current_index = self.tabs.currentIndex()
@@ -112,6 +121,7 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(self.group_tab,   "群组管理")
             self.tabs.addTab(self.task_tab,    "定时任务")
             self.tabs.setCurrentIndex(current_index)
+            self._update_refresh_label()
             self.statusBar().showMessage("界面已重载", 3000)
             logger.info("F5 重载界面成功")
         except Exception as e:
