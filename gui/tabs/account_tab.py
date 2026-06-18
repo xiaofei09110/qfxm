@@ -74,7 +74,7 @@ class ImportWorker(QThread):
 
 
 class CheckWorker(QThread):
-    progress = pyqtSignal(int, str)
+    progress = pyqtSignal(int, int, str)  # current, total, status
     finished = pyqtSignal()
 
     def __init__(self, account_ids):
@@ -82,9 +82,11 @@ class CheckWorker(QThread):
         self.account_ids = account_ids
 
     def run(self):
-        results = batch_check_status(self.account_ids)
-        for aid, status in results:
-            self.progress.emit(aid, status)
+        from api_client import check_account_status
+        total = len(self.account_ids)
+        for i, aid in enumerate(self.account_ids, 1):
+            status = check_account_status(aid)
+            self.progress.emit(i, total, status)
         self.finished.emit()
 
 
