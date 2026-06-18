@@ -16,7 +16,7 @@ import json
 
 from services.proxy import (
     create_task, delete_task, toggle_task, list_tasks, list_groups,
-    list_accounts, switch_task_account,
+    list_accounts, switch_task_account, update_task_cron,
 )
 from config import SERVER_URL
 
@@ -106,6 +106,131 @@ class BatchCreateWorker(QThread):
                 fail += 1
             self.progress.emit(i, total)
         self.finished.emit(success, fail)
+
+
+class BatchRescheduleWorker(QThread):
+    progress = pyqtSignal(int, int)   # current, total
+    finished = pyqtSignal(int, int)   # success, fail
+
+    def __init__(self, task_ids: list, cron_expr: str):
+        super().__init__()
+        self.task_ids = task_ids
+        self.cron_expr = cron_expr
+
+    def run(self):
+        success = fail = 0
+        total = len(self.task_ids)
+        for i, tid in enumerate(self.task_ids, 1):
+            try:
+                update_task_cron(tid, self.cron_expr)
+                success += 1
+            except Exception:
+                fail += 1
+            self.progress.emit(i, total)
+        self.finished.emit(success, fail)
+
+
+class BatchRescheduleDialog(QDialog):
+    """为选中任务批量设置新的执行时间。"""
+
+    def __init__(self, task_ids: list, tasks_map: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("批量修改发送时间")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        names = [tasks_map[tid].name or f"任务{tid}" for tid in task_ids if tid in tasks_map]
+        summary = QLabel(f"将修改以下 {len(task_ids)} 个任务的执行计划：\n" + "、".join(names[:5])
+                         + ("..." if len(names) > 5 else ""))
+        summary.setWordWrap(True)
+        summary.setStyleSheet("color: #555;")
+        layout.addWidget(summary)
+
+        time_group = QGroupBox("新发送时间")
+        tl = QVBoxLayout(time_group)
+
+        self.mode_daily    = QRadioButton("每天固定时间")
+        self.mode_weekly   = QRadioButton("每周指定天")
+        self.mode_interval = QRadioButton("每隔 X 分钟")
+        self.mode_daily.setChecked(True)
+        self._mode_group = QButtonGroup()
+        for btn in [self.mode_daily, self.mode_weekly, self.mode_interval]:
+            self._mode_group.addButton(btn)
+        mode_row = QHBoxLayout()
+        for btn in [self.mode_daily, self.mode_weekly, self.mode_interval]:
+            mode_row.addWidget(btn)
+        tl.addLayout(mode_row)
+
+        hm_row = QHBoxLayout()
+        self.hour_spin   = QSpinBox(); self.hour_spin.setRange(0, 23);  self.hour_spin.setValue(9);  self.hour_spin.setSuffix(" 时")
+        self.minute_spin = QSpinBox(); self.minute_spin.setRange(0, 59); self.minute_spin.setValue(0); self.minute_spin.setSuffix(" 分")
+        hm_row.addWidget(QLabel("时间:")); hm_row.addWidget(self.hour_spin); hm_row.addWidget(self.minute_spin); hm_row.addStretch()
+        tl.addLayout(hm_row)
+
+        self._wd_widget = QWidget()
+        wd_layout = QHBoxLayout(self._wd_widget); wd_layout.setContentsMargins(0, 0, 0, 0)
+        self.weekday_checks = []
+        for i, n in enumerate(["周一", "周二", "周三", "周四", "周五", "周六", "周日"]):
+            cb = QCheckBox(n); cb.setProperty("wd_value", str(i + 1) if i < 6 else "0")
+            self.weekday_checks.append(cb); wd_layout.addWidget(cb)
+        tl.addWidget(self._wd_widget); self._wd_widget.setVisible(False)
+
+        self._iv_widget = QWidget()
+        iv_layout = QHBoxLayout(self._iv_widget); iv_layout.setContentsMargins(0, 0, 0, 0)
+        iv_layout.addWidget(QLabel("每隔"))
+        self.interval_spin = QSpinBox(); self.interval_spin.setRange(1, 1440); self.interval_spin.setValue(10); self.interval_spin.setSuffix(" 分钟")
+        iv_layout.addWidget(self.interval_spin); iv_layout.addStretch()
+        tl.addWidget(self._iv_widget); self._iv_widget.setVisible(False)
+
+        self.preview_label = QLabel()
+        self.preview_label.setStyleSheet("color: #1976D2; font-weight: bold;")
+        tl.addWidget(self.preview_label)
+        layout.addWidget(time_group)
+
+        self.mode_daily.toggled.connect(self._update_mode)
+        self.mode_weekly.toggled.connect(self._update_mode)
+        self.mode_interval.toggled.connect(self._update_mode)
+        self.hour_spin.valueChanged.connect(self._update_preview)
+        self.minute_spin.valueChanged.connect(self._update_preview)
+        self.interval_spin.valueChanged.connect(self._update_preview)
+        for cb in self.weekday_checks:
+            cb.stateChanged.connect(self._update_preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText(f"确认修改 {len(task_ids)} 个任务")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._update_preview()
+
+    def _update_mode(self):
+        is_weekly = self.mode_weekly.isChecked()
+        is_interval = self.mode_interval.isChecked()
+        self._wd_widget.setVisible(is_weekly)
+        self._iv_widget.setVisible(is_interval)
+        self.hour_spin.setEnabled(not is_interval)
+        self.minute_spin.setEnabled(not is_interval)
+        self._update_preview()
+
+    def _update_preview(self):
+        cron = self.get_cron()
+        self.preview_label.setText(f"执行计划：{_cron_to_human(cron)}  （cron: {cron}）")
+
+    def get_cron(self) -> str:
+        hour = self.hour_spin.value()
+        minute = self.minute_spin.value()
+        if self.mode_daily.isChecked():
+            mode, weekdays = "daily", []
+        elif self.mode_weekly.isChecked():
+            mode = "weekly"
+            weekdays = [cb.property("wd_value") for cb in self.weekday_checks if cb.isChecked()]
+            if not weekdays:
+                weekdays = ["1"]
+        else:
+            mode, weekdays = "interval", []
+        return _build_cron(mode, hour, minute, self.interval_spin.value(), weekdays)
 
 
 class TaskDetailDialog(QDialog):
@@ -617,15 +742,16 @@ class TaskTab(QWidget):
         layout = QVBoxLayout(self)
 
         btn_row = QHBoxLayout()
-        self.btn_new     = QPushButton("新建任务")
-        self.btn_batch   = QPushButton("批量分配")
-        self.btn_toggle  = QPushButton("启用/停用")
-        self.btn_switch  = QPushButton("更换账号")
-        self.btn_delete  = QPushButton("删除任务")
-        self.btn_refresh = QPushButton("刷新")
+        self.btn_new        = QPushButton("新建任务")
+        self.btn_batch      = QPushButton("批量分配")
+        self.btn_toggle     = QPushButton("启用/停用")
+        self.btn_switch     = QPushButton("更换账号")
+        self.btn_reschedule = QPushButton("批量改时间")
+        self.btn_delete     = QPushButton("删除任务")
+        self.btn_refresh    = QPushButton("刷新")
         self.btn_batch.setStyleSheet("font-weight: bold;")
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_delete, self.btn_refresh]:
+                    self.btn_switch, self.btn_reschedule, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -646,6 +772,7 @@ class TaskTab(QWidget):
         self.btn_batch.clicked.connect(self._on_batch)
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_switch.clicked.connect(self._on_switch)
+        self.btn_reschedule.clicked.connect(self._on_reschedule)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
         self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
@@ -697,7 +824,7 @@ class TaskTab(QWidget):
 
     def _set_buttons(self, enabled: bool):
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_delete]:
+                    self.btn_switch, self.btn_reschedule, self.btn_delete]:
             btn.setEnabled(enabled)
 
     def _on_new(self):
@@ -945,6 +1072,32 @@ class TaskTab(QWidget):
     def _on_switch_done(self, task):
         self._set_buttons(True)
         self.status_label.setText(f"账号已更换，任务 {task.name or task.id} 错误已清除")
+        self.refresh_table()
+
+    def _on_reschedule(self):
+        ids = self._get_selected_ids()
+        if not ids:
+            self.status_label.setText("请先选中至少一个任务行")
+            return
+        dlg = BatchRescheduleDialog(ids, self._tasks, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        cron = dlg.get_cron()
+        self._set_buttons(False)
+        self.status_label.setText(f"正在修改 {len(ids)} 个任务的时间...")
+        self._reschedule_worker = BatchRescheduleWorker(ids, cron)
+        self._reschedule_worker.progress.connect(
+            lambda cur, total: self.status_label.setText(f"正在修改 {cur}/{total}...")
+        )
+        self._reschedule_worker.finished.connect(self._on_reschedule_done)
+        self._reschedule_worker.start()
+
+    def _on_reschedule_done(self, success, fail):
+        self._set_buttons(True)
+        msg = f"修改完成：成功 {success} 个"
+        if fail:
+            msg += f"，失败 {fail} 个"
+        self.status_label.setText(msg)
         self.refresh_table()
 
     def _on_action_error(self, msg):

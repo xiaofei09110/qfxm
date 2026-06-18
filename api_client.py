@@ -223,6 +223,11 @@ def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动
     return _task(data)
 
 
+def update_task_cron(task_id: int, cron_expr: str) -> SimpleNamespace:
+    data = _put(f"/tasks/{task_id}/cron", json={"cron_expr": cron_expr})
+    return _task(data)
+
+
 def delete_task(task_id: int):
     _delete(f"/tasks/{task_id}")
 

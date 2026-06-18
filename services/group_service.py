@@ -181,6 +181,21 @@ def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动
         return task
 
 
+def update_task_cron(task_id: int, cron_expr: str) -> Task:
+    """修改任务的执行时间（cron），若任务已启用则同步更新调度器。"""
+    with get_session() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise ValueError(f"任务 {task_id} 不存在")
+        task.cron_expr = cron_expr
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        if task.is_active:
+            scheduler.add_task(task.id, cron_expr, execute_task, timezone=task.timezone)
+        return task
+
+
 def restore_all_tasks():
     """
     程序启动时调用，将数据库中所有 is_active=True 的任务重新注册到调度器。

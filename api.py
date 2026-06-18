@@ -266,6 +266,20 @@ def switch_account_ep(task_id: int, req: SwitchAccountRequest, _=Depends(_auth))
     return d
 
 
+class UpdateCronRequest(BaseModel):
+    cron_expr: str
+
+
+@app.put("/tasks/{task_id}/cron")
+def update_cron_ep(task_id: int, req: UpdateCronRequest, _=Depends(_auth)):
+    from services.group_service import update_task_cron
+    task = update_task_cron(task_id, req.cron_expr)
+    d = jsonable_encoder(task)
+    next_run = scheduler.get_next_run(task.id)
+    d["next_run_str"] = next_run.strftime("%m-%d %H:%M") if next_run else None
+    return d
+
+
 @app.delete("/tasks/{task_id}")
 def remove_task(task_id: int, _=Depends(_auth)):
     delete_task(task_id)
