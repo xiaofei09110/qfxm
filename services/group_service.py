@@ -49,11 +49,21 @@ def resolve_group_info(account_id: int, group_username_or_id: str) -> Optional[d
     """
     通过 Telethon 获取群组的真实 ID 和标题。
     group_username_or_id: @username 或数字 ID 字符串
+    未连接时自动尝试重连账号。
     """
     client = client_manager.get_client(account_id)
     if not client:
-        logger.error("账号 %d 未连接", account_id)
-        return None
+        logger.info("账号 %d 未连接，尝试自动连接...", account_id)
+        with get_session() as db:
+            from models.account import Account
+            account = db.get(Account, account_id)
+            if not account:
+                logger.error("账号 %d 不存在", account_id)
+                return None
+        client, status, _ = client_manager.connect_account(account)
+        if status != "active":
+            logger.error("账号 %d 连接失败: %s", account_id, status)
+            return None
     try:
         chat = client_manager.get_entity(account_id, group_username_or_id)
         return {
