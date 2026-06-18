@@ -90,6 +90,19 @@ class CheckWorker(QThread):
         self.finished.emit()
 
 
+class CleanWorker(QThread):
+    finished = pyqtSignal(int)
+
+    def __init__(self, accounts):
+        super().__init__()
+        self.accounts = accounts
+
+    def run(self):
+        for acc in self.accounts:
+            delete_account(acc.id)
+        self.finished.emit(len(self.accounts))
+
+
 class ProfileWorker(QThread):
     finished = pyqtSignal(dict)
     error    = pyqtSignal(str)
@@ -355,9 +368,15 @@ class AccountTab(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        for acc in to_delete:
-            delete_account(acc.id)
-        self.status_label.setText(f"已清理 {len(to_delete)} 个账号（{detail}）")
+        self.btn_clean.setEnabled(False)
+        self.status_label.setText(f"正在清理 {len(to_delete)} 个账号...")
+        self._clean_worker = CleanWorker(to_delete)
+        self._clean_worker.finished.connect(lambda n: self._on_clean_done(n, detail))
+        self._clean_worker.start()
+
+    def _on_clean_done(self, count, detail):
+        self.btn_clean.setEnabled(True)
+        self.status_label.setText(f"已清理 {count} 个账号（{detail}）")
         self.refresh_table()
 
     def _on_profile(self):
