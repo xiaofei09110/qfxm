@@ -112,8 +112,13 @@ def _upload_folder(folder_path: str) -> List[dict]:
 
 
 def check_account_status(account_id: int) -> str:
-    data = _post(f"/accounts/{account_id}/check", timeout=90)
-    return data["status"]
+    try:
+        data = _post(f"/accounts/{account_id}/check", timeout=90)
+        return data.get("status", "error")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("验证账号 %d 失败: %s", account_id, e)
+        return "error"
 
 
 def batch_check_status(account_ids: List[int]) -> List[Tuple[int, str]]:

@@ -85,7 +85,10 @@ class CheckWorker(QThread):
         from api_client import check_account_status
         total = len(self.account_ids)
         for i, aid in enumerate(self.account_ids, 1):
-            status = check_account_status(aid)
+            try:
+                status = check_account_status(aid)
+            except Exception:
+                status = "error"
             self.progress.emit(i, total, status)
         self.finished.emit()
 
