@@ -37,6 +37,80 @@ async def _send_once(client, chat_id, text: str, media_path: str = None):
         await client.send_message(chat_id, text)
 
 
+async def _ensure_joined(client, chat_peer) -> str:
+    """
+    确保账号已加入群组。若未加入则自动 join，join 后等待并点击验证 bot 按钮。
+    返回简短状态描述（用于日志）。
+    """
+    from telethon.tl.functions.channels import JoinChannelRequest
+    from telethon.errors import (
+        UserAlreadyParticipantError, ChannelPrivateError,
+        InviteHashExpiredError, UserBannedInChannelError as BannedError,
+    )
+
+    try:
+        entity = await client.get_entity(chat_peer)
+    except Exception as e:
+        return f"get_entity 失败: {e}"
+
+    try:
+        await client(JoinChannelRequest(entity))
+        logger.info("已加入群组 %s，等待验证 bot...", chat_peer)
+        await asyncio.sleep(4)
+        await _click_join_verify_buttons(client, entity)
+        return "joined"
+    except UserAlreadyParticipantError:
+        return "already_member"
+    except ChannelPrivateError:
+        return "private_group"
+    except (InviteHashExpiredError, BannedError) as e:
+        return f"无法加入: {e}"
+    except Exception as e:
+        logger.warning("加入群组 %s 时出错: %s", chat_peer, e)
+        return f"join_error: {e}"
+
+
+async def _click_join_verify_buttons(client, group_entity):
+    """加入群后，扫描群内和近期私信里的验证 bot 按钮并自动点击。"""
+    # 1. 群内验证消息
+    try:
+        msgs = await client.get_messages(group_entity, limit=20)
+        for msg in msgs:
+            sender = getattr(msg, "sender", None)
+            if not (msg.buttons and sender and getattr(sender, "bot", False)):
+                continue
+            try:
+                await msg.buttons[0][0].click()
+                logger.info("已点击群内验证按钮: %s", msg.buttons[0][0].text)
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning("点击群内验证按钮失败: %s", e)
+            break
+    except Exception as e:
+        logger.warning("扫描群内验证消息失败: %s", e)
+
+    # 2. bot 私信验证（最近 15 个对话里的 bot）
+    try:
+        dialogs = await client.get_dialogs(limit=15)
+        for dialog in dialogs:
+            if not (dialog.is_user and getattr(dialog.entity, "bot", False)):
+                continue
+            msgs = await client.get_messages(dialog.entity, limit=3)
+            for msg in msgs:
+                if not msg.buttons:
+                    continue
+                try:
+                    await msg.buttons[0][0].click()
+                    logger.info("已点击 bot 私信验证按钮 (@%s): %s",
+                                getattr(dialog.entity, "username", "?"),
+                                msg.buttons[0][0].text)
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    logger.warning("点击 bot 私信按钮失败: %s", e)
+    except Exception as e:
+        logger.warning("扫描私信验证消息失败: %s", e)
+
+
 async def safe_send(client, chat_id, text: str, media_path: str = None):
     try:
         await _send_once(client, chat_id, text, media_path)
@@ -98,6 +172,10 @@ def execute_task(task_id: int):
         # 优先用 username 发送，避免 MemorySession 重启后正整数 ID 被 Telethon 误判为用户 ID
         chat_peer = group.username if group.username else int(group.tg_id)
 
+        # 确保账号已加入群组（未加入则自动 join + 点验证按钮）
+        join_status = run_async(_ensure_joined(client, chat_peer), timeout=60)
+        logger.info("任务 %d 加入群组状态: %s", task_id, join_status)
+
         auto_disable = False
         try:
             run_async(safe_send(client, chat_peer, task.message_text, task.media_path), timeout=300)
@@ -110,9 +188,11 @@ def execute_task(task_id: int):
             db.add(group)
             task.fail_count += 1
             task.is_active = False
-            task.last_error = "群组需要人机验证（用手机打开 Telegram 完成验证）"
+            task.last_error = (
+                "加入后仍无发言权限（群可能设置了需管理员审核，或账号在此群有限制）"
+            )
             auto_disable = True
-            logger.warning("任务 %d 已自动停用：群 %s 需要人机验证", task_id, group.tg_id)
+            logger.warning("任务 %d 已自动停用：群 %s 发言被拒", task_id, group.tg_id)
         except Exception as e:
             task.fail_count += 1
             task.is_active = False
