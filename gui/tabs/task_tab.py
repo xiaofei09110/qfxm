@@ -81,7 +81,7 @@ class RefreshWorker(QThread):
 
 
 class TaskDialog(QDialog):
-    def __init__(self, parent=None, accounts=None, groups=None):
+    def __init__(self, parent=None, accounts=None, groups=None, task_counts=None):
         super().__init__(parent)
         self.setWindowTitle("新建定时消息任务")
         self.setMinimumWidth(500)
@@ -92,10 +92,13 @@ class TaskDialog(QDialog):
         self.name.setPlaceholderText("给这个任务起个名字，方便识别")
         layout.addRow("任务名称:", self.name)
 
+        task_counts = task_counts or {}
         self.account_combo = QComboBox()
         for acc in (accounts or []):
-            label = f"{acc.first_name or ''} {acc.phone or ''} (id={acc.id})".strip()
-            self.account_combo.addItem(label, acc.id)
+            count = task_counts.get(acc.id, 0)
+            name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+            tag = "[空闲]" if count == 0 else f"[{count}个任务]"
+            self.account_combo.addItem(f"{name}  {tag}", acc.id)
         layout.addRow("发送账号:", self.account_combo)
 
         self.group_combo = QComboBox()
@@ -307,7 +310,7 @@ class TaskTab(QWidget):
         self.status_label.setText("加载中...")
 
         def fetch():
-            return list_accounts(), list_groups()
+            return list_accounts(), list_groups(), list_tasks()
 
         self._fetch_worker = TaskWorker(fetch)
         self._fetch_worker.finished.connect(self._on_fetch_done)
@@ -321,14 +324,22 @@ class TaskTab(QWidget):
     def _on_fetch_done(self, result):
         self._set_buttons(True)
         self.status_label.setText("")
-        accounts, groups = result
+        accounts, groups, tasks = result
         if not accounts:
             QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
             return
         if not groups:
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
             return
-        dlg = TaskDialog(self, accounts=accounts, groups=groups)
+
+        # 统计每个账号当前任务数，空闲账号排前面
+        task_counts = {}
+        for t in tasks:
+            if t.is_active:
+                task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
+        accounts_sorted = sorted(accounts, key=lambda a: task_counts.get(a.id, 0))
+
+        dlg = TaskDialog(self, accounts=accounts_sorted, groups=groups, task_counts=task_counts)
         if dlg.exec_() != QDialog.Accepted:
             return
         vals = dlg.get_values()
