@@ -5,7 +5,7 @@ group_tab.py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QDialog, QFormLayout,
-    QLineEdit, QComboBox, QDialogButtonBox, QLabel,
+    QLineEdit, QDialogButtonBox, QLabel,
 )
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -18,13 +18,6 @@ class RefreshWorker(QThread):
 
     def run(self):
         self.finished.emit(list_groups())
-
-
-class FetchAccountsWorker(QThread):
-    finished = pyqtSignal(list)
-
-    def run(self):
-        self.finished.emit(list_accounts())
 
 
 class DeleteGroupWorker(QThread):
@@ -44,22 +37,29 @@ class DeleteGroupWorker(QThread):
 
 
 class AddGroupWorker(QThread):
-    finished = pyqtSignal(object)  # group object or None
+    finished = pyqtSignal(object)
     error    = pyqtSignal(str)
 
-    def __init__(self, account_id, group_input):
+    def __init__(self, group_input):
         super().__init__()
-        self.account_id  = account_id
         self.group_input = group_input
 
     def run(self):
-        info = resolve_group_info(self.account_id, self.group_input)
+        # 自动选第一个可用账号来解析群组信息，用户无需关心
+        accounts = list_accounts()
+        active = [a for a in accounts if a.status == "active"]
+        if not active:
+            self.error.emit("没有可用账号，请先在「账号管理」验证账号状态")
+            return
+
+        account_id = active[0].id
+        info = resolve_group_info(account_id, self.group_input)
         if not info:
-            self.error.emit("无法获取群组信息，请确认账号已验证且群组 ID/用户名正确")
+            self.error.emit("无法获取群组信息，请确认群组 @username 或 ID 正确")
             return
         try:
             grp = add_group(
-                account_id=self.account_id,
+                account_id=account_id,
                 tg_id=info["tg_id"],
                 username=info.get("username", ""),
                 title=info.get("title", ""),
@@ -70,20 +70,14 @@ class AddGroupWorker(QThread):
 
 
 class AddGroupDialog(QDialog):
-    def __init__(self, parent=None, accounts=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("添加群组")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(380)
         layout = QFormLayout(self)
-
-        self.account_combo = QComboBox()
-        for acc in (accounts or []):
-            self.account_combo.addItem(f"{acc.name or acc.phone} (id={acc.id})", acc.id)
 
         self.group_input = QLineEdit()
         self.group_input.setPlaceholderText("@username 或群组数字ID")
-
-        layout.addRow("使用账号:", self.account_combo)
         layout.addRow("群组:", self.group_input)
 
         hint = QLabel("输入群组 @username 或数字 ID，程序会自动获取群组信息")
@@ -95,11 +89,8 @@ class AddGroupDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
-    def get_values(self):
-        return {
-            "account_id":  self.account_combo.currentData(),
-            "group_input": self.group_input.text().strip(),
-        }
+    def get_group_input(self) -> str:
+        return self.group_input.text().strip()
 
 
 class GroupTab(QWidget):
@@ -179,28 +170,16 @@ class GroupTab(QWidget):
             self.verify_banner.setVisible(False)
 
     def _on_add(self):
-        self.btn_add.setEnabled(False)
-        self.status_label.setText("加载账号列表...")
-        self._fetch_accounts_worker = FetchAccountsWorker()
-        self._fetch_accounts_worker.finished.connect(self._on_accounts_fetched)
-        self._fetch_accounts_worker.start()
-
-    def _on_accounts_fetched(self, accounts):
-        self.btn_add.setEnabled(True)
-        self.status_label.setText("")
-        if not accounts:
-            QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
-            return
-        dlg = AddGroupDialog(self, accounts=accounts)
+        dlg = AddGroupDialog(self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        vals = dlg.get_values()
-        if not vals["group_input"] or vals["account_id"] is None:
-            QMessageBox.warning(self, "提示", "请填写群组信息并选择账号")
+        group_input = dlg.get_group_input()
+        if not group_input:
+            QMessageBox.warning(self, "提示", "请填写群组 @username 或数字 ID")
             return
         self.btn_add.setEnabled(False)
         self.status_label.setText("正在获取群组信息...")
-        self._add_worker = AddGroupWorker(vals["account_id"], vals["group_input"])
+        self._add_worker = AddGroupWorker(group_input)
         self._add_worker.finished.connect(self._on_add_done)
         self._add_worker.error.connect(self._on_add_error)
         self._add_worker.start()
