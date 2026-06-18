@@ -23,5 +23,6 @@ class Task(SQLModel, table=True):
     next_run: Optional[datetime] = None
     run_count: int = Field(default=0)
     fail_count: int = Field(default=0)
-    last_error: Optional[str] = None   # 最近一次失败的原因
+    last_error: Optional[str] = None        # 最近一次失败的原因
+    account_history: Optional[str] = None   # JSON: [{time, account_id, old_account_id, reason}]
     created_at: datetime = Field(default_factory=datetime.now)

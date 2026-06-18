@@ -23,6 +23,10 @@ def _migrate_db():
             conn.execute(sqlalchemy.text("ALTER TABLE tasks ADD COLUMN last_error TEXT"))
             conn.commit()
             logger.info("DB migration: added column tasks.last_error")
+        if "account_history" not in cols:
+            conn.execute(sqlalchemy.text("ALTER TABLE tasks ADD COLUMN account_history TEXT"))
+            conn.commit()
+            logger.info("DB migration: added column tasks.account_history")
 
 
 def get_session():

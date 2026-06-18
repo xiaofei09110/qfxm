@@ -231,6 +231,21 @@ def toggle(task_id: int, active: bool, _=Depends(_auth)):
     return {"ok": True}
 
 
+class SwitchAccountRequest(BaseModel):
+    new_account_id: int
+    reason: str = "手动更换"
+
+
+@app.put("/tasks/{task_id}/account")
+def switch_account_ep(task_id: int, req: SwitchAccountRequest, _=Depends(_auth)):
+    from services.group_service import switch_task_account
+    task = switch_task_account(task_id, req.new_account_id, req.reason)
+    d = jsonable_encoder(task)
+    next_run = scheduler.get_next_run(task.id)
+    d["next_run_str"] = next_run.strftime("%m-%d %H:%M") if next_run else None
+    return d
+
+
 @app.delete("/tasks/{task_id}")
 def remove_task(task_id: int, _=Depends(_auth)):
     delete_task(task_id)

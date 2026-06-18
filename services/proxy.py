@@ -24,6 +24,7 @@ if IS_REMOTE:
         create_task,
         toggle_task,
         delete_task,
+        switch_task_account,
         batch_update_profiles_remote,
     )
 
@@ -47,6 +48,7 @@ else:
         create_task,
         toggle_task,
         delete_task,
+        switch_task_account,
         resolve_group_info,
     )
 

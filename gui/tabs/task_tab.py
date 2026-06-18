@@ -12,9 +12,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
+import json
+
 from services.proxy import (
     create_task, delete_task, toggle_task, list_tasks, list_groups,
-    list_accounts,
+    list_accounts, switch_task_account,
 )
 from config import SERVER_URL
 
@@ -104,6 +106,147 @@ class BatchCreateWorker(QThread):
                 fail += 1
             self.progress.emit(i, total)
         self.finished.emit(success, fail)
+
+
+class TaskDetailDialog(QDialog):
+    """双击任务行弹出的详情对话框：完整错误 + 换号历史。"""
+
+    switch_requested = pyqtSignal()  # 用户点击了"更换账号"
+
+    def __init__(self, task, accounts_map: dict, parent=None):
+        super().__init__(parent)
+        self.task = task
+        self.setWindowTitle(f"任务详情 — {task.name or task.id}")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # 基本信息
+        form = QFormLayout()
+        form.addRow("任务ID:", QLabel(str(task.id)))
+        form.addRow("任务名称:", QLabel(task.name or ""))
+        form.addRow("目标群组:", QLabel(f"群组 ID={task.group_id}"))
+        acc_name = accounts_map.get(task.account_id, f"ID={task.account_id}")
+        form.addRow("当前账号:", QLabel(acc_name))
+        form.addRow("执行计划:", QLabel(_cron_to_human(task.cron_expr)))
+        form.addRow("成功/失败:", QLabel(f"{task.run_count}/{task.fail_count}"))
+        next_str = getattr(task, "next_run_str", None) or "未知"
+        form.addRow("下次执行:", QLabel(next_str))
+        layout.addLayout(form)
+
+        # 最近错误
+        last_error = getattr(task, "last_error", None) or ""
+        if last_error:
+            layout.addWidget(QLabel("最近错误:"))
+            err_box = QLabel(last_error)
+            err_box.setWordWrap(True)
+            err_box.setStyleSheet(
+                "color: #F44336; background: #FFF3F3; border: 1px solid #FFCDD2;"
+                " border-radius: 4px; padding: 8px;"
+            )
+            layout.addWidget(err_box)
+
+        # 换号历史
+        layout.addWidget(QLabel("账号使用历史:"))
+        history_table = QTableWidget(0, 3)
+        history_table.setHorizontalHeaderLabels(["时间", "切换到账号", "原因"])
+        history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        history_table.setMaximumHeight(160)
+
+        raw = getattr(task, "account_history", None) or "[]"
+        try:
+            history = json.loads(raw)
+        except Exception:
+            history = []
+        history_table.setRowCount(len(history))
+        for r, entry in enumerate(history):
+            acc_id = entry.get("account_id", "?")
+            acc_label = accounts_map.get(acc_id, f"ID={acc_id}")
+            history_table.setItem(r, 0, QTableWidgetItem(entry.get("time", "")))
+            history_table.setItem(r, 1, QTableWidgetItem(acc_label))
+            history_table.setItem(r, 2, QTableWidgetItem(entry.get("reason", "")))
+        layout.addWidget(history_table)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        self.btn_switch = QPushButton("更换账号")
+        self.btn_switch.setStyleSheet("font-weight: bold;")
+        btn_close = QPushButton("关闭")
+        btn_row.addWidget(self.btn_switch)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        self.btn_switch.clicked.connect(lambda: (self.accept(), self.switch_requested.emit()))
+        btn_close.clicked.connect(self.reject)
+
+
+class SwitchAccountDialog(QDialog):
+    """选择新账号并检测同群冲突。"""
+
+    def __init__(self, task, accounts, all_tasks, parent=None):
+        super().__init__(parent)
+        self.task = task
+        self.setWindowTitle(f"更换账号 — {task.name or task.id}")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # 统计每个账号已有几个活跃任务、是否在同群
+        task_counts = {}
+        same_group_accounts = set()
+        for t in all_tasks:
+            if t.is_active and t.id != task.id:
+                task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
+                if t.group_id == task.group_id:
+                    same_group_accounts.add(t.account_id)
+
+        accounts_sorted = sorted(accounts, key=lambda a: task_counts.get(a.id, 0))
+
+        info = QLabel(f"当前任务：{task.name or task.id}（群组 ID={task.group_id}）")
+        info.setStyleSheet("color: #666;")
+        layout.addWidget(info)
+
+        layout.addWidget(QLabel("选择新账号："))
+        self.combo = QComboBox()
+        self._accounts_list = accounts_sorted
+        for acc in accounts_sorted:
+            count = task_counts.get(acc.id, 0)
+            name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+            tag = "[空闲]" if count == 0 else f"[{count}个任务]"
+            self.combo.addItem(f"{name}  {tag}", acc.id)
+        layout.addWidget(self.combo)
+
+        self.conflict_label = QLabel()
+        self.conflict_label.setStyleSheet(
+            "color: #856404; background: #FFF3CD; border-radius: 4px; padding: 6px;"
+        )
+        self.conflict_label.setWordWrap(True)
+        self.conflict_label.setVisible(False)
+        layout.addWidget(self.conflict_label)
+
+        self._same_group_accounts = same_group_accounts
+        self.combo.currentIndexChanged.connect(self._check_conflict)
+        self._check_conflict()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _check_conflict(self):
+        acc_id = self.combo.currentData()
+        if acc_id in self._same_group_accounts:
+            self.conflict_label.setText(
+                f"⚠ 此账号已有同一群组的任务，继续操作会导致同一群组有多个账号发消息。"
+            )
+            self.conflict_label.setVisible(True)
+        else:
+            self.conflict_label.setVisible(False)
+
+    def get_account_id(self) -> int:
+        return self.combo.currentData()
 
 
 class TaskDialog(QDialog):
@@ -477,10 +620,12 @@ class TaskTab(QWidget):
         self.btn_new     = QPushButton("新建任务")
         self.btn_batch   = QPushButton("批量分配")
         self.btn_toggle  = QPushButton("启用/停用")
+        self.btn_switch  = QPushButton("更换账号")
         self.btn_delete  = QPushButton("删除任务")
         self.btn_refresh = QPushButton("刷新")
         self.btn_batch.setStyleSheet("font-weight: bold;")
-        for btn in [self.btn_new, self.btn_batch, self.btn_toggle, self.btn_delete, self.btn_refresh]:
+        for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
+                    self.btn_switch, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -500,8 +645,10 @@ class TaskTab(QWidget):
         self.btn_new.clicked.connect(self._on_new)
         self.btn_batch.clicked.connect(self._on_batch)
         self.btn_toggle.clicked.connect(self._on_toggle)
+        self.btn_switch.clicked.connect(self._on_switch)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
+        self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
 
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
@@ -549,7 +696,8 @@ class TaskTab(QWidget):
             self.table.setItem(row, 8, err_item)
 
     def _set_buttons(self, enabled: bool):
-        for btn in [self.btn_new, self.btn_batch, self.btn_toggle, self.btn_delete]:
+        for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
+                    self.btn_switch, self.btn_delete]:
             btn.setEnabled(enabled)
 
     def _on_new(self):
@@ -715,6 +863,88 @@ class TaskTab(QWidget):
         if fail:
             msg += f"，失败 {fail} 个"
         self.status_label.setText(msg)
+        self.refresh_table()
+
+    # ── 双击查看详情 ────────────────────────────────────────────────────
+
+    def _on_row_double_clicked(self, row: int, _col: int):
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        task_id = int(item.text())
+        task = self._tasks.get(task_id)
+        if not task:
+            return
+        # 用已有账号列表构建 id→名字 映射（_fetch_worker 数据可能有，否则异步拉）
+        self._open_detail(task)
+
+    def _open_detail(self, task):
+        self._set_buttons(False)
+        self.status_label.setText("加载中...")
+
+        def fetch():
+            return list_accounts(), list_tasks()
+
+        self._detail_fetch_worker = TaskWorker(fetch)
+        self._detail_fetch_worker.finished.connect(
+            lambda r: self._show_detail_dialog(task, r)
+        )
+        self._detail_fetch_worker.error.connect(lambda e: (
+            self._set_buttons(True),
+            self.status_label.setText(""),
+            QMessageBox.critical(self, "错误", e),
+        ))
+        self._detail_fetch_worker.start()
+
+    def _show_detail_dialog(self, task, fetch_result):
+        self._set_buttons(True)
+        self.status_label.setText("")
+        accounts, all_tasks = fetch_result
+        accounts_map = {}
+        for acc in accounts:
+            name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+            accounts_map[acc.id] = f"{name} (ID={acc.id})"
+
+        dlg = TaskDetailDialog(task, accounts_map, self)
+        dlg.switch_requested.connect(
+            lambda: self._open_switch_dialog(task, accounts, all_tasks)
+        )
+        dlg.exec_()
+
+    # ── 更换账号 ────────────────────────────────────────────────────────
+
+    def _on_switch(self):
+        ids = self._get_selected_ids()
+        if len(ids) != 1:
+            self.status_label.setText("请先选中一个任务行再点更换账号")
+            return
+        task = self._tasks.get(ids[0])
+        if not task:
+            return
+        self._open_detail(task)  # 复用详情加载，从详情里点换号
+
+    def _open_switch_dialog(self, task, accounts, all_tasks):
+        dlg = SwitchAccountDialog(task, accounts, all_tasks, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        new_account_id = dlg.get_account_id()
+        if new_account_id == task.account_id:
+            self.status_label.setText("账号未变更")
+            return
+
+        self._set_buttons(False)
+        self.status_label.setText("正在更换账号...")
+        self._switch_worker = TaskWorker(
+            switch_task_account, task_id=task.id,
+            new_account_id=new_account_id, reason="手动更换"
+        )
+        self._switch_worker.finished.connect(self._on_switch_done)
+        self._switch_worker.error.connect(self._on_action_error)
+        self._switch_worker.start()
+
+    def _on_switch_done(self, task):
+        self._set_buttons(True)
+        self.status_label.setText(f"账号已更换，任务 {task.name or task.id} 错误已清除")
         self.refresh_table()
 
     def _on_action_error(self, msg):

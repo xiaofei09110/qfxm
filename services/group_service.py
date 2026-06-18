@@ -2,6 +2,7 @@
 group_service.py
 群组管理：添加群组、检测发言权限、关联账号、注册定时任务。
 """
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -94,6 +95,12 @@ def create_task(
     创建定时消息任务并注册到调度器。
     """
     with get_session() as db:
+        init_history = json.dumps([{
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "account_id": account_id,
+            "old_account_id": None,
+            "reason": "初始创建",
+        }], ensure_ascii=False)
         task = Task(
             name=name,
             account_id=account_id,
@@ -102,6 +109,7 @@ def create_task(
             cron_expr=cron_expr,
             timezone=timezone,
             media_path=media_path,
+            account_history=init_history,
         )
         db.add(task)
         db.commit()
@@ -147,6 +155,30 @@ def delete_task(task_id: int):
 def list_tasks() -> List[Task]:
     with get_session() as db:
         return db.exec(select(Task)).all()
+
+
+def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动更换") -> Task:
+    """更换任务绑定的账号，并将换号记录追加到 account_history。"""
+    with get_session() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise ValueError(f"任务 {task_id} 不存在")
+
+        history = json.loads(task.account_history or "[]")
+        history.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "account_id": new_account_id,
+            "old_account_id": task.account_id,
+            "reason": reason,
+        })
+
+        task.account_id = new_account_id
+        task.account_history = json.dumps(history, ensure_ascii=False)
+        task.last_error = None  # 换号后清空上次错误
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return task
 
 
 def restore_all_tasks():

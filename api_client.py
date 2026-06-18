@@ -207,6 +207,12 @@ def toggle_task(task_id: int, active: bool):
     _put(f"/tasks/{task_id}/toggle", params={"active": active})
 
 
+def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动更换") -> SimpleNamespace:
+    data = _put(f"/tasks/{task_id}/account",
+                json={"new_account_id": new_account_id, "reason": reason})
+    return _task(data)
+
+
 def delete_task(task_id: int):
     _delete(f"/tasks/{task_id}")
 
