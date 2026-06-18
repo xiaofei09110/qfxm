@@ -115,12 +115,20 @@ def list_accounts() -> List[Account]:
 
 
 def delete_account(account_id: int):
+    import os
     client_manager.disconnect_account(account_id)
     with get_session() as db:
         account = db.get(Account, account_id)
         if account:
+            session_path = account.session_path
             db.delete(account)
             db.commit()
+            if session_path and os.path.exists(session_path):
+                try:
+                    os.remove(session_path)
+                    logger.info("已删除 session 文件: %s", session_path)
+                except Exception as e:
+                    logger.warning("删除 session 文件失败: %s", e)
 
 
 def update_proxy(account_id: int, proxy_type: str, host: str, port: int,
