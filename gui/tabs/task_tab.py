@@ -74,7 +74,7 @@ class TaskWorker(QThread):
 
 
 class TaskDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, accounts=None, groups=None):
         super().__init__(parent)
         self.setWindowTitle("新建定时消息任务")
         self.setMinimumWidth(500)
@@ -86,13 +86,13 @@ class TaskDialog(QDialog):
         layout.addRow("任务名称:", self.name)
 
         self.account_combo = QComboBox()
-        for acc in list_accounts():
+        for acc in (accounts or []):
             label = f"{acc.first_name or ''} {acc.phone or ''} (id={acc.id})".strip()
             self.account_combo.addItem(label, acc.id)
         layout.addRow("发送账号:", self.account_combo)
 
         self.group_combo = QComboBox()
-        for grp in list_groups():
+        for grp in (groups or []):
             self.group_combo.addItem(f"{grp.title or grp.tg_id}", grp.id)
         layout.addRow("目标群组:", self.group_combo)
 
@@ -288,13 +288,32 @@ class TaskTab(QWidget):
             btn.setEnabled(enabled)
 
     def _on_new(self):
-        if not list_accounts():
+        self._set_buttons(False)
+        self.status_label.setText("加载中...")
+
+        def fetch():
+            return list_accounts(), list_groups()
+
+        self._fetch_worker = TaskWorker(fetch)
+        self._fetch_worker.finished.connect(self._on_fetch_done)
+        self._fetch_worker.error.connect(lambda e: (
+            self._set_buttons(True),
+            self.status_label.setText(""),
+            QMessageBox.critical(self, "错误", e),
+        ))
+        self._fetch_worker.start()
+
+    def _on_fetch_done(self, result):
+        self._set_buttons(True)
+        self.status_label.setText("")
+        accounts, groups = result
+        if not accounts:
             QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
             return
-        if not list_groups():
+        if not groups:
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
             return
-        dlg = TaskDialog(self)
+        dlg = TaskDialog(self, accounts=accounts, groups=groups)
         if dlg.exec_() != QDialog.Accepted:
             return
         vals = dlg.get_values()

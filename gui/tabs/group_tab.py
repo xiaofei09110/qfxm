@@ -40,14 +40,14 @@ class AddGroupWorker(QThread):
 
 
 class AddGroupDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, accounts=None):
         super().__init__(parent)
         self.setWindowTitle("添加群组")
         self.setMinimumWidth(400)
         layout = QFormLayout(self)
 
         self.account_combo = QComboBox()
-        for acc in list_accounts():
+        for acc in (accounts or []):
             self.account_combo.addItem(f"{acc.name or acc.phone} (id={acc.id})", acc.id)
 
         self.group_input = QLineEdit()
@@ -143,7 +143,8 @@ class GroupTab(QWidget):
             self.verify_banner.setVisible(False)
 
     def _on_add(self):
-        dlg = AddGroupDialog(self)
+        accounts = list_accounts()
+        dlg = AddGroupDialog(self, accounts=accounts)
         if dlg.exec_() != QDialog.Accepted:
             return
         vals = dlg.get_values()
