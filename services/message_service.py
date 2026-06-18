@@ -81,19 +81,28 @@ def execute_task(task_id: int):
         if client is None:
             from models.account import Account
             account = db.get(Account, task.account_id)
-            if account:
-                client, status, _ = client_manager.connect_account(account)
-                if status != "active":
-                    task.fail_count += 1
-                    db.add(task)
-                    db.commit()
-                    return
+            if not account:
+                logger.error("任务 %d：账号 %d 不存在", task_id, task.account_id)
+                task.fail_count += 1
+                db.add(task)
+                db.commit()
+                return
+            client, status, _ = client_manager.connect_account(account)
+            if status != "active":
+                logger.warning("任务 %d：账号连接失败 status=%s", task_id, status)
+                task.fail_count += 1
+                db.add(task)
+                db.commit()
+                return
+
+        # 优先用 username 发送，避免 MemorySession 重启后正整数 ID 被 Telethon 误判为用户 ID
+        chat_peer = group.username if group.username else int(group.tg_id)
 
         try:
-            run_async(safe_send(client, int(group.tg_id), task.message_text, task.media_path))
+            run_async(safe_send(client, chat_peer, task.message_text, task.media_path), timeout=300)
             task.run_count += 1
             task.last_run = datetime.now()
-            logger.info("任务 %d 执行成功", task_id)
+            logger.info("任务 %d 执行成功，发送至 %s", task_id, chat_peer)
         except NeedsVerificationError:
             group.needs_verify = True
             db.add(group)
