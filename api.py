@@ -109,6 +109,18 @@ def spambot_verify_ep(account_id: int, _=Depends(_auth)):
     return {"message": result}
 
 
+class GroupVerifyRequest(BaseModel):
+    account_id: int
+
+
+@app.post("/groups/{group_id}/verify")
+def group_verify_ep(group_id: int, req: GroupVerifyRequest, _=Depends(_auth)):
+    """用指定账号自动完成群组入群验证（点击 bot 验证按钮）。"""
+    from services.verification_service import verify_group_join
+    result = verify_group_join(req.account_id, group_id)
+    return {"message": result}
+
+
 class ProfileRequest(BaseModel):
     account_ids: List[int]
     first_name: Optional[str] = None

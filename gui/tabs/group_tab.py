@@ -9,8 +9,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit
 
-from services.proxy import list_groups, resolve_group_info, add_group, list_accounts, delete_group
+from services.proxy import (
+    list_groups, resolve_group_info, add_group, list_accounts,
+    delete_group, verify_group_join,
+)
 
 
 class RefreshWorker(QThread):
@@ -73,6 +77,27 @@ class AddGroupWorker(QThread):
             self.error.emit(str(e))
 
 
+class GroupVerifyWorker(QThread):
+    """对需要验证的群组批量执行入群验证点击。"""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, items: list):
+        """items: list of (account_id, group_id, group_title)"""
+        super().__init__()
+        self.items = items
+
+    def run(self):
+        for account_id, group_id, title in self.items:
+            self.progress.emit(f"正在验证：{title}...")
+            try:
+                result = verify_group_join(account_id, group_id)
+            except Exception as e:
+                result = f"出错：{e}"
+            self.progress.emit(f"【{title}】\n{result}")
+        self.finished.emit()
+
+
 class AddGroupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -100,6 +125,7 @@ class AddGroupDialog(QDialog):
 class GroupTab(QWidget):
     def __init__(self):
         super().__init__()
+        self._groups = []
         self._build_ui()
         self.refresh_table()
 
@@ -118,12 +144,21 @@ class GroupTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
+        banner_row = QHBoxLayout()
         self.verify_banner = QLabel("")
         self.verify_banner.setStyleSheet(
             "background: #FFF3CD; color: #856404; padding: 8px; border-radius: 4px;"
         )
         self.verify_banner.setVisible(False)
-        layout.addWidget(self.verify_banner)
+        self.btn_auto_verify = QPushButton("自动验证")
+        self.btn_auto_verify.setStyleSheet(
+            "background: #FF9800; color: white; font-weight: bold; padding: 4px 12px;"
+        )
+        self.btn_auto_verify.setVisible(False)
+        self.btn_auto_verify.clicked.connect(self._on_auto_verify)
+        banner_row.addWidget(self.verify_banner, 1)
+        banner_row.addWidget(self.btn_auto_verify)
+        layout.addLayout(banner_row)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -148,6 +183,7 @@ class GroupTab(QWidget):
         worker.start()
 
     def _populate_table(self, groups):
+        self._groups = groups  # 缓存，供自动验证使用
         self.table.setRowCount(len(groups))
         needs_verify = []
         for row, grp in enumerate(groups):
@@ -168,12 +204,60 @@ class GroupTab(QWidget):
 
         if needs_verify:
             names = "、".join(needs_verify[:3])
+            extra = f" 等{len(needs_verify)}个" if len(needs_verify) > 3 else ""
             self.verify_banner.setText(
-                f"以下群组需要人机验证（用手机打开 Telegram 完成验证后点刷新）：{names}"
+                f"以下群组需要入群验证：{names}{extra}（可点「自动验证」自动处理）"
             )
             self.verify_banner.setVisible(True)
+            self.btn_auto_verify.setVisible(True)
         else:
             self.verify_banner.setVisible(False)
+            self.btn_auto_verify.setVisible(False)
+
+    def _on_auto_verify(self):
+        groups = getattr(self, "_groups", [])
+        need = [g for g in groups if g.needs_verify]
+        if not need:
+            return
+
+        # 拉取账号列表，找第一个 active 账号来执行验证
+        accounts = list_accounts()
+        active = [a for a in accounts if a.status == "active"]
+        if not active:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "提示", "没有可用账号，请先验证账号状态")
+            return
+
+        account_id = active[0].id
+        items = [(account_id, g.id, g.title or g.tg_id) for g in need]
+
+        self.btn_auto_verify.setEnabled(False)
+        self.btn_auto_verify.setText("验证中...")
+
+        # 进度弹窗
+        self._verify_dlg = QDialog(self)
+        self._verify_dlg.setWindowTitle("入群自动验证进度")
+        self._verify_dlg.setMinimumSize(540, 400)
+        dlg_layout = QVBoxLayout(self._verify_dlg)
+        self._verify_log = QTextEdit()
+        self._verify_log.setReadOnly(True)
+        self._verify_log.setStyleSheet("font-family: monospace; font-size: 12px;")
+        dlg_layout.addWidget(self._verify_log)
+        self._verify_dlg.show()
+
+        self._verify_worker = GroupVerifyWorker(items)
+        self._verify_worker.progress.connect(lambda msg: (
+            self._verify_log.append(msg),
+            self._verify_log.append("─" * 40),
+        ))
+        self._verify_worker.finished.connect(self._on_verify_done)
+        self._verify_worker.start()
+
+    def _on_verify_done(self):
+        self.btn_auto_verify.setEnabled(True)
+        self.btn_auto_verify.setText("自动验证")
+        self._verify_log.append("\n✅ 所有验证流程已完成，正在刷新群组状态...")
+        self.refresh_table()
 
     def _on_add(self):
         dlg = AddGroupDialog(self)

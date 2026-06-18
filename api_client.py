@@ -134,6 +134,11 @@ def verify_account_spambot(account_id: int) -> str:
     return data.get("message", "")
 
 
+def verify_group_join(account_id: int, group_id: int) -> str:
+    data = _post(f"/groups/{group_id}/verify", json={"account_id": account_id})
+    return data.get("message", "")
+
+
 def delete_account(account_id: int):
     _delete(f"/accounts/{account_id}")
 

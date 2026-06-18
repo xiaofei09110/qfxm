@@ -1,12 +1,15 @@
 """
 verification_service.py
-通过 Telethon 自动与 @SpamBot 交互，完成账号限制申诉流程。
+两类自动验证：
 
-SpamBot 验证流程：
-  1. 发送 /start 给 @SpamBot
-  2. 读取回复 —— 判断账号是否受限
-  3. 如受限，自动点击申诉按钮（"NO, I DIDN'T DO THAT" 之类）
-  4. 返回最终结果文本
+1. SpamBot 申诉（verify_account）
+   账号被 Telegram 全局限制时，自动联系 @SpamBot 点申诉按钮。
+
+2. 群组入群验证（verify_group_join）
+   进群后验证机器人发的"点按钮才能发言"验证：
+   - 扫描群内近期 bot 消息，找内联按钮并点击
+   - 同时扫描与群相关的 bot 私信，点击验证按钮
+   - 清除数据库中的 needs_verify 标记，重新激活任务
 """
 import asyncio
 import logging
@@ -134,3 +137,193 @@ def verify_account(account_id: int) -> str:
     except Exception as e:
         logger.error("账号 %d SpamBot 申诉异常: %s", account_id, e)
         return f"执行出错：{e}"
+
+
+# ── 群组入群验证 ──────────────────────────────────────────────────────────
+
+
+# 跳过这些按钮文字（明显不是验证按钮）
+_SKIP_BTN_KEYWORDS = [
+    "skip", "cancel", "back", "menu", "close", "规则", "rule",
+    "help", "about", "info",
+]
+
+# 验证按钮常见关键词（优先点）
+_VERIFY_BTN_KEYWORDS = [
+    "verify", "human", "i am", "confirm", "continue", "join",
+    "start", "accept", "agree", "验证", "确认", "我是人",
+    "点击", "click", "press",
+]
+
+
+async def _click_buttons_in_message(msg) -> list[str]:
+    """点击一条消息里的内联按钮，返回点击结果列表。"""
+    actions = []
+    if not msg.buttons:
+        return actions
+
+    # 先找匹配验证关键词的按钮，没有再点第一个
+    target_btn = None
+    for row in msg.buttons:
+        for btn in row:
+            txt = btn.text.lower()
+            if any(kw in txt for kw in _SKIP_BTN_KEYWORDS):
+                continue
+            if any(kw in txt for kw in _VERIFY_BTN_KEYWORDS):
+                target_btn = btn
+                break
+        if target_btn:
+            break
+
+    if target_btn is None:
+        # 取第一个非跳过按钮
+        for row in msg.buttons:
+            for btn in row:
+                if not any(kw in btn.text.lower() for kw in _SKIP_BTN_KEYWORDS):
+                    target_btn = btn
+                    break
+            if target_btn:
+                break
+
+    if target_btn:
+        try:
+            await target_btn.click()
+            actions.append(f"✅ 点击按钮「{target_btn.text}」成功")
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            actions.append(f"⚠️ 点击按钮「{target_btn.text}」失败：{e}")
+
+    return actions
+
+
+async def _verify_in_group(client, group_peer) -> list[str]:
+    """扫描群内近期 bot 消息并点击验证按钮。"""
+    actions = []
+    try:
+        msgs = await client.get_messages(group_peer, limit=30)
+    except Exception as e:
+        return [f"读取群消息失败：{e}"]
+
+    for msg in msgs:
+        sender = getattr(msg, "sender", None)
+        is_bot = sender and getattr(sender, "bot", False)
+        if not (msg.buttons and is_bot):
+            continue
+        results = await _click_buttons_in_message(msg)
+        if results:
+            actions.extend(results)
+            break  # 一般只有一条验证消息，点完就停
+
+    return actions or ["群内未发现带按钮的 bot 验证消息"]
+
+
+async def _verify_in_dms(client) -> list[str]:
+    """扫描最近私信，找 bot 发来的验证消息并点击。"""
+    actions = []
+    try:
+        # 只看最近 20 个对话中的 bot 私信
+        dialogs = await client.get_dialogs(limit=20)
+    except Exception as e:
+        return [f"读取对话列表失败：{e}"]
+
+    for dialog in dialogs:
+        entity = dialog.entity
+        if not (dialog.is_user and getattr(entity, "bot", False)):
+            continue
+        try:
+            msgs = await client.get_messages(entity, limit=3)
+        except Exception:
+            continue
+        for msg in msgs:
+            if not msg.buttons:
+                continue
+            bot_name = getattr(entity, "username", None) or str(entity.id)
+            results = await _click_buttons_in_message(msg)
+            if results:
+                actions.extend([f"[私信 @{bot_name}] {r}" for r in results])
+
+    return actions or ["私信中未发现待验证的 bot 消息"]
+
+
+async def _do_group_verify(client, group_peer) -> str:
+    """完整执行一次群组入群验证：群内 + 私信。"""
+    lines = ["── 群内验证消息 ──"]
+    lines += await _verify_in_group(client, group_peer)
+    await asyncio.sleep(2)
+    lines += ["", "── Bot 私信验证 ──"]
+    lines += await _verify_in_dms(client)
+    return "\n".join(lines)
+
+
+def verify_group_join(account_id: int, group_id: int) -> str:
+    """
+    同步入口：用指定账号对指定群执行入群验证点击。
+    验证通过后清除 DB 中的 needs_verify 标记并重新激活相关任务。
+    """
+    from core.client_manager import client_manager, run_async
+    from database import get_session
+    from models.account import Account
+    from models.group import Group
+    from models.task import Task
+    from sqlmodel import select
+    import core.scheduler as scheduler
+    from services.message_service import execute_task
+
+    # 取账号
+    with get_session() as db:
+        account = db.get(Account, account_id)
+        group = db.get(Group, group_id)
+        if not account:
+            return "账号不存在"
+        if not group:
+            return "群组不存在"
+
+    client = client_manager.get_client(account_id)
+    if client is None:
+        with get_session() as db:
+            account = db.get(Account, account_id)
+        client, status, _ = client_manager.connect_account(account)
+        if status != "active":
+            return f"账号连接失败（状态: {status}），请先验证账号"
+
+    group_peer = group.username if group.username else int(group.tg_id)
+
+    try:
+        result = run_async(_do_group_verify(client, group_peer), timeout=30)
+    except Exception as e:
+        return f"验证执行出错：{e}"
+
+    # 清除 needs_verify 并重新激活该群的任务
+    with get_session() as db:
+        grp = db.get(Group, group_id)
+        if grp:
+            grp.needs_verify = False
+            db.add(grp)
+
+        tasks = db.exec(
+            select(Task).where(Task.group_id == group_id, Task.is_active == False)
+        ).all()
+        reactivated = []
+        for task in tasks:
+            if task.last_error and "验证" in task.last_error:
+                task.is_active = True
+                task.last_error = None
+                db.add(task)
+                reactivated.append(task.id)
+
+        db.commit()
+
+    if reactivated:
+        # 重新注册到调度器
+        with get_session() as db:
+            for tid in reactivated:
+                task = db.get(Task, tid)
+                if task:
+                    scheduler.add_task(task.id, task.cron_expr, execute_task,
+                                       timezone=task.timezone)
+        result += f"\n\n✅ 已重新激活任务：{reactivated}"
+    else:
+        result += "\n\n（未找到因验证停用的任务，请手动启用）"
+
+    logger.info("群 %d 入群验证完成: %s", group_id, result[:100])
+    return result
