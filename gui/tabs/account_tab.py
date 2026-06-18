@@ -241,9 +241,9 @@ class AccountTab(QWidget):
             status_item.setForeground(QColor(STATUS_COLORS.get(acc.status, "#9E9E9E")))
             self.table.setItem(row, 3, status_item)
 
-            spam = acc.spamblock or "正常"
-            spam_item = QTableWidgetItem(spam)
-            if acc.spamblock:
+            is_spammed = acc.spamblock and acc.spamblock.lower() not in ("free", "none", "ok", "")
+            spam_item = QTableWidgetItem("正常" if not is_spammed else acc.spamblock)
+            if is_spammed:
                 spam_item.setForeground(QColor("#F44336"))
             self.table.setItem(row, 4, spam_item)
 
