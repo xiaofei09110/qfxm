@@ -73,6 +73,13 @@ class TaskWorker(QThread):
             self.error.emit(str(e))
 
 
+class RefreshWorker(QThread):
+    finished = pyqtSignal(list)
+
+    def run(self):
+        self.finished.emit(list_tasks())
+
+
 class TaskDialog(QDialog):
     def __init__(self, parent=None, accounts=None, groups=None):
         super().__init__(parent)
@@ -220,6 +227,7 @@ class TaskTab(QWidget):
     def __init__(self):
         super().__init__()
         self._worker = None
+        self._tasks = {}
         self._build_ui()
         self.refresh_table()
 
@@ -254,7 +262,14 @@ class TaskTab(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_table)
 
     def refresh_table(self):
-        tasks = list_tasks()
+        if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
+            return
+        self._refresh_worker = RefreshWorker()
+        self._refresh_worker.finished.connect(self._populate_table)
+        self._refresh_worker.start()
+
+    def _populate_table(self, tasks):
+        self._tasks = {t.id: t for t in tasks}
         self.table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
             if hasattr(task, "next_run_str"):
@@ -345,12 +360,11 @@ class TaskTab(QWidget):
         if not ids:
             self.status_label.setText("请先选中任务行")
             return
-        tasks = {t.id: t for t in list_tasks()}
         self._set_buttons(False)
 
         def do_toggle():
             for tid in ids:
-                task = tasks.get(tid)
+                task = self._tasks.get(tid)
                 if task:
                     toggle_task(tid, not task.is_active)
             return None

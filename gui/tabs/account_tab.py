@@ -106,6 +106,26 @@ class CleanWorker(QThread):
         self.finished.emit(len(self.accounts))
 
 
+class RefreshWorker(QThread):
+    finished = pyqtSignal(list)
+
+    def run(self):
+        self.finished.emit(list_accounts())
+
+
+class DeleteWorker(QThread):
+    finished = pyqtSignal()
+
+    def __init__(self, ids):
+        super().__init__()
+        self.ids = ids
+
+    def run(self):
+        for aid in self.ids:
+            delete_account(aid)
+        self.finished.emit()
+
+
 class ProfileWorker(QThread):
     finished = pyqtSignal(dict)
     error    = pyqtSignal(str)
@@ -172,6 +192,7 @@ class ProfileDialog(QDialog):
 class AccountTab(QWidget):
     def __init__(self):
         super().__init__()
+        self._accounts = []
         self._build_ui()
         self.refresh_table()
 
@@ -230,7 +251,14 @@ class AccountTab(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_table)
 
     def refresh_table(self):
-        accounts = list_accounts()
+        if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
+            return
+        self._refresh_worker = RefreshWorker()
+        self._refresh_worker.finished.connect(self._populate_table)
+        self._refresh_worker.start()
+
+    def _populate_table(self, accounts):
+        self._accounts = accounts
         self.table.setRowCount(len(accounts))
         for row, acc in enumerate(accounts):
             self.table.setItem(row, 0, QTableWidgetItem(str(acc.id)))
@@ -334,7 +362,10 @@ class AccountTab(QWidget):
         self._start_check(ids)
 
     def _on_check_all(self):
-        ids = [a.id for a in list_accounts()]
+        ids = [a.id for a in self._accounts]
+        if not ids:
+            self.status_label.setText("列表为空，请先等待刷新完成或点「刷新列表」")
+            return
         self._start_check(ids)
 
     def _on_check_progress(self, current, total, status):
@@ -346,16 +377,22 @@ class AccountTab(QWidget):
         self.progress_bar.setVisible(False)
         self.btn_check_selected.setEnabled(True)
         self.btn_check_all.setEnabled(True)
-        accounts = list_accounts()
+        self.status_label.setText("验证完成，正在刷新数据...")
+        worker = RefreshWorker()
+        worker.finished.connect(self._on_check_refresh_done)
+        self._check_refresh_worker = worker
+        worker.start()
+
+    def _on_check_refresh_done(self, accounts):
+        self._populate_table(accounts)
         active = sum(1 for a in accounts if a.status == "active")
         self.status_label.setText(f"验证完成：{active}/{len(accounts)} 个账号正常")
-        self.refresh_table()
 
     def _on_clean(self):
         """一键删除失效/封号/多地登录账号，同时删除服务器 session 文件。"""
         CLEAN_STATUSES = {"invalid", "banned", "restricted"}
         STATUS_DESC = {"invalid": "失效", "banned": "封号", "restricted": "多地登录"}
-        accounts = list_accounts()
+        accounts = self._accounts
         to_delete = [a for a in accounts if a.status in CLEAN_STATUSES]
         if not to_delete:
             QMessageBox.information(self, "提示", "没有需要清理的账号（失效/封号/多地登录）")
@@ -419,10 +456,18 @@ class AccountTab(QWidget):
         reply = QMessageBox.question(
             self, "确认删除", f"确认从数据库删除 {len(ids)} 个账号记录？\n（不会删除 session 文件）"
         )
-        if reply == QMessageBox.Yes:
-            for aid in ids:
-                delete_account(aid)
-            self.refresh_table()
+        if reply != QMessageBox.Yes:
+            return
+        self.btn_delete.setEnabled(False)
+        self.status_label.setText(f"正在删除 {len(ids)} 个账号...")
+        self._delete_worker = DeleteWorker(ids)
+        self._delete_worker.finished.connect(self._on_delete_done)
+        self._delete_worker.start()
+
+    def _on_delete_done(self):
+        self.btn_delete.setEnabled(True)
+        self.status_label.setText("删除完成")
+        self.refresh_table()
 
     def _get_selected_ids(self):
         rows = set(idx.row() for idx in self.table.selectedIndexes())

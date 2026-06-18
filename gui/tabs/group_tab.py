@@ -10,7 +10,37 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
-from services.proxy import list_groups, resolve_group_info, add_group, list_accounts
+from services.proxy import list_groups, resolve_group_info, add_group, list_accounts, delete_group
+
+
+class RefreshWorker(QThread):
+    finished = pyqtSignal(list)
+
+    def run(self):
+        self.finished.emit(list_groups())
+
+
+class FetchAccountsWorker(QThread):
+    finished = pyqtSignal(list)
+
+    def run(self):
+        self.finished.emit(list_accounts())
+
+
+class DeleteGroupWorker(QThread):
+    finished = pyqtSignal()
+
+    def __init__(self, ids):
+        super().__init__()
+        self.ids = ids
+
+    def run(self):
+        for gid in self.ids:
+            try:
+                delete_group(gid)
+            except Exception:
+                pass
+        self.finished.emit()
 
 
 class AddGroupWorker(QThread):
@@ -114,7 +144,13 @@ class GroupTab(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_table)
 
     def refresh_table(self):
-        groups = list_groups()
+        if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
+            return
+        self._refresh_worker = RefreshWorker()
+        self._refresh_worker.finished.connect(self._populate_table)
+        self._refresh_worker.start()
+
+    def _populate_table(self, groups):
         self.table.setRowCount(len(groups))
         needs_verify = []
         for row, grp in enumerate(groups):
@@ -143,7 +179,18 @@ class GroupTab(QWidget):
             self.verify_banner.setVisible(False)
 
     def _on_add(self):
-        accounts = list_accounts()
+        self.btn_add.setEnabled(False)
+        self.status_label.setText("加载账号列表...")
+        self._fetch_accounts_worker = FetchAccountsWorker()
+        self._fetch_accounts_worker.finished.connect(self._on_accounts_fetched)
+        self._fetch_accounts_worker.start()
+
+    def _on_accounts_fetched(self, accounts):
+        self.btn_add.setEnabled(True)
+        self.status_label.setText("")
+        if not accounts:
+            QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
+            return
         dlg = AddGroupDialog(self, accounts=accounts)
         if dlg.exec_() != QDialog.Accepted:
             return
@@ -176,10 +223,13 @@ class GroupTab(QWidget):
         reply = QMessageBox.question(self, "确认删除", f"确认删除 {len(ids)} 个群组？")
         if reply != QMessageBox.Yes:
             return
-        from services.proxy import delete_group
-        for gid in ids:
-            try:
-                delete_group(gid)
-            except Exception:
-                pass
+        self.btn_delete.setEnabled(False)
+        self.status_label.setText(f"正在删除 {len(ids)} 个群组...")
+        self._delete_worker = DeleteGroupWorker(ids)
+        self._delete_worker.finished.connect(self._on_delete_done)
+        self._delete_worker.start()
+
+    def _on_delete_done(self):
+        self.btn_delete.setEnabled(True)
+        self.status_label.setText("删除完成")
         self.refresh_table()
