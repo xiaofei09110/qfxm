@@ -110,9 +110,8 @@ class TaskDialog(QDialog):
         layout = QFormLayout(self)
         layout.setSpacing(10)
 
-        self.name = QLineEdit()
-        self.name.setPlaceholderText("给这个任务起个名字，方便识别")
-        layout.addRow("任务名称:", self.name)
+        self._groups_list = groups or []
+        self._name_auto = True  # 标记名称是否仍为自动填写状态
 
         task_counts = task_counts or {}
         self.account_combo = QComboBox()
@@ -124,9 +123,13 @@ class TaskDialog(QDialog):
         layout.addRow("发送账号:", self.account_combo)
 
         self.group_combo = QComboBox()
-        for grp in (groups or []):
+        for grp in self._groups_list:
             self.group_combo.addItem(f"{grp.title or grp.tg_id}", grp.id)
         layout.addRow("目标群组:", self.group_combo)
+
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("自动填写群组名，可手动修改")
+        layout.addRow("任务名称:", self.name)
 
         self.message = QTextEdit()
         self.message.setPlaceholderText("输入要发送的消息内容...")
@@ -201,13 +204,24 @@ class TaskDialog(QDialog):
         self.interval_spin.valueChanged.connect(self._update_preview)
         for cb in self.weekday_checks:
             cb.stateChanged.connect(self._update_preview)
+        self.group_combo.currentIndexChanged.connect(self._auto_fill_name)
+        self.name.textEdited.connect(lambda: setattr(self, '_name_auto', False))
 
         self._update_preview()
+        self._auto_fill_name()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+    def _auto_fill_name(self):
+        if not self._name_auto:
+            return
+        idx = self.group_combo.currentIndex()
+        if 0 <= idx < len(self._groups_list):
+            grp = self._groups_list[idx]
+            self.name.setText(grp.title or grp.tg_id)
 
     def _update_mode(self):
         is_weekly   = self.mode_weekly.isChecked()
@@ -249,7 +263,7 @@ class TaskDialog(QDialog):
 
 
 class BatchTaskDialog(QDialog):
-    def __init__(self, parent=None, accounts=None, groups=None, task_counts=None):
+    def __init__(self, parent=None, accounts=None, groups=None, task_counts=None, group_task_counts=None):
         super().__init__(parent)
         self.setWindowTitle("批量分配任务")
         self.setMinimumWidth(660)
@@ -257,6 +271,7 @@ class BatchTaskDialog(QDialog):
 
         self._groups = groups or []
         self._task_counts = task_counts or {}
+        self._group_task_counts = group_task_counts or {}  # 每个群已有的活跃任务数
         self._accounts_sorted = sorted(
             accounts or [],
             key=lambda a: self._task_counts.get(a.id, 0)
@@ -340,7 +355,9 @@ class BatchTaskDialog(QDialog):
             row_widget = QWidget()
             row = QHBoxLayout(row_widget); row.setContentsMargins(0,0,0,0)
 
-            cb = QCheckBox(grp.title or grp.tg_id)
+            existing = self._group_task_counts.get(grp.id, 0)
+            cb_label = grp.title or grp.tg_id
+            cb = QCheckBox(cb_label)
             cb.setChecked(True)
             cb.stateChanged.connect(self._update_confirm_btn)
             self._checks.append(cb)
@@ -354,6 +371,10 @@ class BatchTaskDialog(QDialog):
             self._combos.append(combo)
 
             row.addWidget(cb, 1)
+            if existing > 0:
+                warn = QLabel(f"⚠ 已有{existing}个任务")
+                warn.setStyleSheet("color: #FF9800; font-size: 11px;")
+                row.addWidget(warn)
             row.addWidget(combo)
             rows_layout.addWidget(row_widget)
 
@@ -647,13 +668,16 @@ class TaskTab(QWidget):
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
             return
 
-        task_counts = {}
+        task_counts = {}        # 每个账号的活跃任务数
+        group_task_counts = {}  # 每个群组的活跃任务数
         for t in tasks:
             if t.is_active:
                 task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
+                group_task_counts[t.group_id] = group_task_counts.get(t.group_id, 0) + 1
         accounts_sorted = sorted(accounts, key=lambda a: task_counts.get(a.id, 0))
 
-        dlg = BatchTaskDialog(self, accounts=accounts_sorted, groups=groups, task_counts=task_counts)
+        dlg = BatchTaskDialog(self, accounts=accounts_sorted, groups=groups,
+                              task_counts=task_counts, group_task_counts=group_task_counts)
         if dlg.exec_() != QDialog.Accepted:
             return
         if not dlg.message.toPlainText().strip():
