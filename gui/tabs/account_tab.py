@@ -39,6 +39,40 @@ STATUS_LABELS = {
 }
 
 
+class ImportWorker(QThread):
+    progress = pyqtSignal(int, int, str)  # current, total, phone
+    finished = pyqtSignal(list)
+
+    def __init__(self, mode, path):
+        super().__init__()
+        self.mode = mode  # "folder" or "folders"
+        self.path = path  # str or list[str]
+
+    def run(self):
+        import os
+        from api_client import _upload_folder
+
+        if self.mode == "folder":
+            folders = [
+                os.path.join(self.path, name)
+                for name in sorted(os.listdir(self.path))
+                if os.path.isdir(os.path.join(self.path, name)) and name.isdigit()
+            ]
+        else:
+            folders = self.path
+
+        total = len(folders)
+        results = []
+        for i, folder in enumerate(folders, 1):
+            phone = os.path.basename(folder)
+            self.progress.emit(i, total, phone)
+            try:
+                results.extend(_upload_folder(folder))
+            except Exception as e:
+                results.append({"status": "failed", "phone": phone, "reason": str(e)})
+        self.finished.emit(results)
+
+
 class CheckWorker(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal()
@@ -52,6 +86,23 @@ class CheckWorker(QThread):
         for aid, status in results:
             self.progress.emit(aid, status)
         self.finished.emit()
+
+
+class ProfileWorker(QThread):
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(self, selected_ids, vals):
+        super().__init__()
+        self.selected_ids = selected_ids
+        self.vals = vals
+
+    def run(self):
+        try:
+            results = batch_update_profiles_gui(self.selected_ids, **self.vals)
+            self.finished.emit(results or {})
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class ProfileDialog(QDialog):
@@ -186,13 +237,30 @@ class AccountTab(QWidget):
             checked = acc.last_checked.strftime("%m-%d %H:%M") if acc.last_checked else "—"
             self.table.setItem(row, 7, QTableWidgetItem(checked))
 
+    def _set_import_buttons(self, enabled: bool):
+        self.btn_import_folder.setEnabled(enabled)
+        self.btn_import_single.setEnabled(enabled)
+
+    def _start_import(self, mode, path):
+        self._set_import_buttons(False)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("准备上传...")
+        self._import_worker = ImportWorker(mode, path)
+        self._import_worker.progress.connect(self._on_import_progress)
+        self._import_worker.finished.connect(self._on_import_done)
+        self._import_worker.start()
+
+    def _on_import_progress(self, current, total, phone):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.status_label.setText(f"正在上传 {current}/{total}：{phone}")
+
     def _on_import_folder(self):
         parent = QFileDialog.getExistingDirectory(self, "选择协议号父文件夹")
         if not parent:
             return
-        self.status_label.setText("导入中，请稍候...")
-        results = import_from_parent_folder(parent)
-        self._show_import_result(results)
+        self._start_import("folder", parent)
 
     def _on_import_single(self):
         folders = []
@@ -205,8 +273,11 @@ class AccountTab(QWidget):
             folders.append(folder)
         if not folders:
             return
-        self.status_label.setText("导入中，请稍候...")
-        results = import_from_folders(folders)
+        self._start_import("folders", folders)
+
+    def _on_import_done(self, results):
+        self.progress_bar.setVisible(False)
+        self._set_import_buttons(True)
         self._show_import_result(results)
 
     def _show_import_result(self, results):
@@ -290,15 +361,23 @@ class AccountTab(QWidget):
         if not any(vals.values()):
             QMessageBox.information(self, "提示", "没有填写任何修改内容")
             return
-        try:
-            results = batch_update_profiles_gui(selected_ids, **vals)
-            if not results:
-                QMessageBox.warning(self, "提示", "选中账号均未连接，请先点「验证账号」")
-                return
-            success = sum(1 for v in results.values() if v)
-            self.status_label.setText(f"资料修改：{success}/{len(selected_ids)} 个成功")
-        except Exception as e:
-            QMessageBox.critical(self, "修改失败", str(e))
+        self.btn_profile.setEnabled(False)
+        self.status_label.setText("正在修改资料，请稍候...")
+        self._profile_worker = ProfileWorker(selected_ids, vals)
+        self._profile_worker.finished.connect(lambda r: self._on_profile_done(r, len(selected_ids)))
+        self._profile_worker.error.connect(lambda e: (
+            QMessageBox.critical(self, "修改失败", e),
+            self.btn_profile.setEnabled(True),
+        ))
+        self._profile_worker.start()
+
+    def _on_profile_done(self, results, total):
+        self.btn_profile.setEnabled(True)
+        if not results:
+            QMessageBox.warning(self, "提示", "选中账号均未连接，请先点「验证账号」")
+            return
+        success = sum(1 for v in results.values() if v)
+        self.status_label.setText(f"资料修改：{success}/{total} 个成功")
 
     def _on_delete(self):
         ids = self._get_selected_ids()
