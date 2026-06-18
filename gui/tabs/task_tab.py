@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QDialog, QFormLayout,
     QLineEdit, QComboBox, QTextEdit, QDialogButtonBox, QLabel,
     QSpinBox, QRadioButton, QButtonGroup, QGroupBox, QCheckBox,
+    QScrollArea,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -78,6 +79,27 @@ class RefreshWorker(QThread):
 
     def run(self):
         self.finished.emit(list_tasks())
+
+
+class BatchCreateWorker(QThread):
+    progress = pyqtSignal(int, int)   # current, total
+    finished = pyqtSignal(int, int)   # success, fail
+
+    def __init__(self, tasks_params):
+        super().__init__()
+        self.tasks_params = tasks_params
+
+    def run(self):
+        success = fail = 0
+        total = len(self.tasks_params)
+        for i, params in enumerate(self.tasks_params, 1):
+            try:
+                create_task(**params)
+                success += 1
+            except Exception:
+                fail += 1
+            self.progress.emit(i, total)
+        self.finished.emit(success, fail)
 
 
 class TaskDialog(QDialog):
@@ -226,6 +248,195 @@ class TaskDialog(QDialog):
         }
 
 
+class BatchTaskDialog(QDialog):
+    def __init__(self, parent=None, accounts=None, groups=None, task_counts=None):
+        super().__init__(parent)
+        self.setWindowTitle("批量分配任务")
+        self.setMinimumWidth(660)
+        self.setMinimumHeight(540)
+
+        self._groups = groups or []
+        self._task_counts = task_counts or {}
+        self._accounts_sorted = sorted(
+            accounts or [],
+            key=lambda a: self._task_counts.get(a.id, 0)
+        )
+
+        main = QVBoxLayout(self)
+        main.setSpacing(10)
+
+        # ── 消息内容 ──
+        form = QFormLayout()
+        self.message = QTextEdit()
+        self.message.setMinimumHeight(80)
+        self.message.setMaximumHeight(120)
+        self.message.setPlaceholderText("输入要发送的消息内容（所有群组共用同一条消息）...")
+        form.addRow("消息内容:", self.message)
+        main.addLayout(form)
+
+        # ── 时间设置 ──
+        time_group = QGroupBox("发送时间设置")
+        tl = QVBoxLayout(time_group)
+
+        self.mode_daily    = QRadioButton("每天固定时间")
+        self.mode_weekly   = QRadioButton("每周指定天")
+        self.mode_interval = QRadioButton("每隔 X 分钟")
+        self.mode_daily.setChecked(True)
+        self._mode_group = QButtonGroup()
+        for btn in [self.mode_daily, self.mode_weekly, self.mode_interval]:
+            self._mode_group.addButton(btn)
+        mode_row = QHBoxLayout()
+        for btn in [self.mode_daily, self.mode_weekly, self.mode_interval]:
+            mode_row.addWidget(btn)
+        tl.addLayout(mode_row)
+
+        hm_row = QHBoxLayout()
+        self.hour_spin   = QSpinBox(); self.hour_spin.setRange(0, 23);  self.hour_spin.setValue(9);  self.hour_spin.setSuffix(" 时")
+        self.minute_spin = QSpinBox(); self.minute_spin.setRange(0, 59); self.minute_spin.setValue(0); self.minute_spin.setSuffix(" 分")
+        hm_row.addWidget(QLabel("时间:")); hm_row.addWidget(self.hour_spin); hm_row.addWidget(self.minute_spin); hm_row.addStretch()
+        tl.addLayout(hm_row)
+
+        self._wd_widget = QWidget()
+        wd_layout = QHBoxLayout(self._wd_widget); wd_layout.setContentsMargins(0,0,0,0)
+        self.weekday_checks = []
+        for i, n in enumerate(["周一","周二","周三","周四","周五","周六","周日"]):
+            cb = QCheckBox(n); cb.setProperty("wd_value", str(i+1) if i<6 else "0")
+            self.weekday_checks.append(cb); wd_layout.addWidget(cb)
+        tl.addWidget(self._wd_widget); self._wd_widget.setVisible(False)
+
+        self._iv_widget = QWidget()
+        iv_layout = QHBoxLayout(self._iv_widget); iv_layout.setContentsMargins(0,0,0,0)
+        iv_layout.addWidget(QLabel("每隔"))
+        self.interval_spin = QSpinBox(); self.interval_spin.setRange(1,1440); self.interval_spin.setValue(30); self.interval_spin.setSuffix(" 分钟")
+        iv_layout.addWidget(self.interval_spin); iv_layout.addStretch()
+        tl.addWidget(self._iv_widget); self._iv_widget.setVisible(False)
+
+        self.preview_label = QLabel()
+        self.preview_label.setStyleSheet("color: #1976D2; font-weight: bold;")
+        tl.addWidget(self.preview_label)
+        main.addWidget(time_group)
+
+        tz_row = QHBoxLayout()
+        tz_row.addWidget(QLabel("时区:"))
+        self.timezone = QComboBox()
+        self.timezone.addItems(["Asia/Shanghai", "UTC", "America/New_York", "Europe/London"])
+        tz_row.addWidget(self.timezone); tz_row.addStretch()
+        main.addLayout(tz_row)
+
+        # ── 群组分配列表 ──
+        main.addWidget(QLabel("选择群组（自动分配空闲账号，可手动更换）："))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        rows_layout = QVBoxLayout(scroll_widget)
+        rows_layout.setSpacing(4)
+        rows_layout.setContentsMargins(4, 4, 4, 4)
+
+        self._checks = []
+        self._combos = []
+
+        for grp in self._groups:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget); row.setContentsMargins(0,0,0,0)
+
+            cb = QCheckBox(grp.title or grp.tg_id)
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._update_confirm_btn)
+            self._checks.append(cb)
+
+            combo = QComboBox(); combo.setMinimumWidth(220)
+            for acc in self._accounts_sorted:
+                count = self._task_counts.get(acc.id, 0)
+                name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+                tag = "[空闲]" if count == 0 else f"[{count}个任务]"
+                combo.addItem(f"{name}  {tag}", acc.id)
+            self._combos.append(combo)
+
+            row.addWidget(cb, 1)
+            row.addWidget(combo)
+            rows_layout.addWidget(row_widget)
+
+        rows_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        main.addWidget(scroll)
+
+        # ── 底部按钮 ──
+        btn_row = QHBoxLayout()
+        self.confirm_btn = QPushButton()
+        self.confirm_btn.setStyleSheet("font-weight: bold; padding: 4px 16px;")
+        cancel_btn = QPushButton("取消")
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.confirm_btn)
+        main.addLayout(btn_row)
+
+        # 连接信号
+        self.mode_daily.toggled.connect(self._update_mode)
+        self.mode_weekly.toggled.connect(self._update_mode)
+        self.mode_interval.toggled.connect(self._update_mode)
+        self.hour_spin.valueChanged.connect(self._update_preview)
+        self.minute_spin.valueChanged.connect(self._update_preview)
+        self.interval_spin.valueChanged.connect(self._update_preview)
+        for cb in self.weekday_checks:
+            cb.stateChanged.connect(self._update_preview)
+        self.confirm_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+
+        self._update_preview()
+        self._update_confirm_btn()
+
+    def _update_mode(self):
+        is_weekly = self.mode_weekly.isChecked()
+        is_interval = self.mode_interval.isChecked()
+        self._wd_widget.setVisible(is_weekly)
+        self._iv_widget.setVisible(is_interval)
+        self.hour_spin.setEnabled(not is_interval)
+        self.minute_spin.setEnabled(not is_interval)
+        self._update_preview()
+
+    def _update_preview(self):
+        cron = self._get_cron()
+        self.preview_label.setText(f"执行计划：{_cron_to_human(cron)}  （cron: {cron}）")
+
+    def _get_cron(self) -> str:
+        hour = self.hour_spin.value()
+        minute = self.minute_spin.value()
+        if self.mode_daily.isChecked():
+            mode, weekdays = "daily", []
+        elif self.mode_weekly.isChecked():
+            mode = "weekly"
+            weekdays = [cb.property("wd_value") for cb in self.weekday_checks if cb.isChecked()]
+            if not weekdays:
+                weekdays = ["1"]
+        else:
+            mode, weekdays = "interval", []
+        return _build_cron(mode, hour, minute, self.interval_spin.value(), weekdays)
+
+    def _update_confirm_btn(self):
+        count = sum(1 for cb in self._checks if cb.isChecked())
+        self.confirm_btn.setText(f"确认创建 {count} 个任务")
+        self.confirm_btn.setEnabled(count > 0)
+
+    def get_batch_tasks(self) -> list:
+        cron = self._get_cron()
+        tz   = self.timezone.currentText()
+        msg  = self.message.toPlainText().strip()
+        result = []
+        for i, (cb, combo) in enumerate(zip(self._checks, self._combos)):
+            if cb.isChecked():
+                grp = self._groups[i]
+                result.append({
+                    "name":         grp.title or grp.tg_id,
+                    "account_id":   combo.currentData(),
+                    "group_id":     grp.id,
+                    "message_text": msg,
+                    "cron_expr":    cron,
+                    "timezone":     tz,
+                })
+        return result
+
+
 class TaskTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -239,10 +450,12 @@ class TaskTab(QWidget):
 
         btn_row = QHBoxLayout()
         self.btn_new     = QPushButton("新建任务")
+        self.btn_batch   = QPushButton("批量分配")
         self.btn_toggle  = QPushButton("启用/停用")
         self.btn_delete  = QPushButton("删除任务")
         self.btn_refresh = QPushButton("刷新")
-        for btn in [self.btn_new, self.btn_toggle, self.btn_delete, self.btn_refresh]:
+        self.btn_batch.setStyleSheet("font-weight: bold;")
+        for btn in [self.btn_new, self.btn_batch, self.btn_toggle, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -260,6 +473,7 @@ class TaskTab(QWidget):
         layout.addWidget(self.table)
 
         self.btn_new.clicked.connect(self._on_new)
+        self.btn_batch.clicked.connect(self._on_batch)
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
@@ -302,7 +516,7 @@ class TaskTab(QWidget):
             ))
 
     def _set_buttons(self, enabled: bool):
-        for btn in [self.btn_new, self.btn_toggle, self.btn_delete]:
+        for btn in [self.btn_new, self.btn_batch, self.btn_toggle, self.btn_delete]:
             btn.setEnabled(enabled)
 
     def _on_new(self):
@@ -404,6 +618,68 @@ class TaskTab(QWidget):
         self._worker.finished.connect(lambda _: (self._set_buttons(True), self.status_label.setText(""), self.refresh_table()))
         self._worker.error.connect(self._on_action_error)
         self._worker.start()
+
+    def _on_batch(self):
+        self._set_buttons(False)
+        self.status_label.setText("加载中...")
+
+        def fetch():
+            return list_accounts(), list_groups(), list_tasks()
+
+        self._batch_fetch_worker = TaskWorker(fetch)
+        self._batch_fetch_worker.finished.connect(self._on_batch_fetch_done)
+        self._batch_fetch_worker.error.connect(lambda e: (
+            self._set_buttons(True),
+            self.status_label.setText(""),
+            QMessageBox.critical(self, "错误", e),
+        ))
+        self._batch_fetch_worker.start()
+
+    def _on_batch_fetch_done(self, result):
+        self._set_buttons(True)
+        self.status_label.setText("")
+        accounts, groups, tasks = result
+
+        if not accounts:
+            QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
+            return
+        if not groups:
+            QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
+            return
+
+        task_counts = {}
+        for t in tasks:
+            if t.is_active:
+                task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
+        accounts_sorted = sorted(accounts, key=lambda a: task_counts.get(a.id, 0))
+
+        dlg = BatchTaskDialog(self, accounts=accounts_sorted, groups=groups, task_counts=task_counts)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        if not dlg.message.toPlainText().strip():
+            QMessageBox.warning(self, "提示", "消息内容不能为空")
+            return
+
+        tasks_params = dlg.get_batch_tasks()
+        if not tasks_params:
+            return
+
+        self._set_buttons(False)
+        self.status_label.setText(f"正在创建 {len(tasks_params)} 个任务...")
+        self._batch_worker = BatchCreateWorker(tasks_params)
+        self._batch_worker.progress.connect(
+            lambda cur, total: self.status_label.setText(f"正在创建 {cur}/{total}...")
+        )
+        self._batch_worker.finished.connect(self._on_batch_done)
+        self._batch_worker.start()
+
+    def _on_batch_done(self, success, fail):
+        self._set_buttons(True)
+        msg = f"批量创建完成：成功 {success} 个"
+        if fail:
+            msg += f"，失败 {fail} 个"
+        self.status_label.setText(msg)
+        self.refresh_table()
 
     def _on_action_error(self, msg):
         self._set_buttons(True)
