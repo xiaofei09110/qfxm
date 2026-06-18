@@ -19,6 +19,7 @@ if IS_REMOTE:
         list_groups,
         resolve_group_info,
         add_group,
+        delete_group,
         list_tasks,
         create_task,
         toggle_task,
@@ -41,12 +42,13 @@ else:
     from services.group_service import (         # noqa
         list_groups,
         add_group,
+        delete_group,
         list_tasks,
         create_task,
         toggle_task,
         delete_task,
+        resolve_group_info,
     )
-    from services.group_service import resolve_group_info  # noqa
 
     def batch_update_profiles_gui(selected_ids: list, **vals) -> dict:
         from core.client_manager import client_manager, run_async

@@ -185,6 +185,13 @@ def save_group(req: SaveGroupRequest, _=Depends(_auth)):
     return jsonable_encoder(group)
 
 
+@app.delete("/groups/{group_id}", dependencies=[Depends(_auth)])
+def remove_group(group_id: int):
+    from services.group_service import delete_group
+    delete_group(group_id)
+    return {"status": "ok"}
+
+
 # ── 定时任务 ──────────────────────────────────────────────────────────
 
 @app.get("/tasks")

@@ -177,6 +177,10 @@ def add_group(account_id: int, tg_id: str, username: str = "", title: str = "") 
     return _group(data)
 
 
+def delete_group(group_id: int):
+    _delete(f"/groups/{group_id}")
+
+
 # ── 定时任务 ──────────────────────────────────────────────────────────
 
 def list_tasks() -> List[SimpleNamespace]:

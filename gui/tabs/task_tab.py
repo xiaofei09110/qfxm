@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QComboBox, QTextEdit, QDialogButtonBox, QLabel,
     QSpinBox, QRadioButton, QButtonGroup, QGroupBox, QCheckBox,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
 from services.proxy import (
@@ -56,6 +56,23 @@ def _cron_to_human(cron: str) -> str:
         return cron
 
 
+class TaskWorker(QThread):
+    finished = pyqtSignal(object)
+    error    = pyqtSignal(str)
+
+    def __init__(self, action, **kwargs):
+        super().__init__()
+        self.action = action
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self.action(**self.kwargs)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class TaskDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,7 +101,6 @@ class TaskDialog(QDialog):
         self.message.setMinimumHeight(80)
         layout.addRow("消息内容:", self.message)
 
-        # 时间设置
         time_group = QGroupBox("发送时间设置")
         time_layout = QVBoxLayout(time_group)
 
@@ -203,6 +219,7 @@ class TaskDialog(QDialog):
 class TaskTab(QWidget):
     def __init__(self):
         super().__init__()
+        self._worker = None
         self._build_ui()
         self.refresh_table()
 
@@ -240,7 +257,6 @@ class TaskTab(QWidget):
         tasks = list_tasks()
         self.table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
-            # 下次执行：远程模式从服务器拿，本地模式从 scheduler 拿
             if hasattr(task, "next_run_str"):
                 next_str = task.next_run_str or "未注册"
             else:
@@ -267,6 +283,10 @@ class TaskTab(QWidget):
                 f"{task.run_count}/{task.fail_count}"
             ))
 
+    def _set_buttons(self, enabled: bool):
+        for btn in [self.btn_new, self.btn_toggle, self.btn_delete]:
+            btn.setEnabled(enabled)
+
     def _on_new(self):
         if not list_accounts():
             QMessageBox.warning(self, "提示", "请先在「账号管理」导入并验证账号")
@@ -274,7 +294,6 @@ class TaskTab(QWidget):
         if not list_groups():
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
             return
-
         dlg = TaskDialog(self)
         if dlg.exec_() != QDialog.Accepted:
             return
@@ -282,20 +301,25 @@ class TaskTab(QWidget):
         if not vals["message_text"]:
             QMessageBox.warning(self, "提示", "消息内容不能为空")
             return
-        try:
-            task = create_task(**vals)
-            if hasattr(task, "next_run_str"):
-                next_str = task.next_run_str or "未知"
-            else:
-                import core.scheduler as scheduler
-                next_run = scheduler.get_next_run(task.id)
-                next_str = next_run.strftime("%m-%d %H:%M") if next_run else "未知"
-            self.status_label.setText(
-                f"任务已创建：{_cron_to_human(task.cron_expr)}，下次执行：{next_str}"
-            )
-            self.refresh_table()
-        except Exception as e:
-            QMessageBox.critical(self, "创建失败", str(e))
+        self._set_buttons(False)
+        self.status_label.setText("正在创建任务...")
+        self._worker = TaskWorker(create_task, **vals)
+        self._worker.finished.connect(self._on_create_done)
+        self._worker.error.connect(self._on_action_error)
+        self._worker.start()
+
+    def _on_create_done(self, task):
+        self._set_buttons(True)
+        if hasattr(task, "next_run_str"):
+            next_str = task.next_run_str or "未知"
+        else:
+            import core.scheduler as scheduler
+            next_run = scheduler.get_next_run(task.id)
+            next_str = next_run.strftime("%m-%d %H:%M") if next_run else "未知"
+        self.status_label.setText(
+            f"任务已创建：{_cron_to_human(task.cron_expr)}，下次执行：{next_str}"
+        )
+        self.refresh_table()
 
     def _on_toggle(self):
         ids = self._get_selected_ids()
@@ -303,21 +327,44 @@ class TaskTab(QWidget):
             self.status_label.setText("请先选中任务行")
             return
         tasks = {t.id: t for t in list_tasks()}
-        for tid in ids:
-            task = tasks.get(tid)
-            if task:
-                toggle_task(tid, not task.is_active)
-        self.refresh_table()
+        self._set_buttons(False)
+
+        def do_toggle():
+            for tid in ids:
+                task = tasks.get(tid)
+                if task:
+                    toggle_task(tid, not task.is_active)
+            return None
+
+        self._worker = TaskWorker(do_toggle)
+        self._worker.finished.connect(lambda _: (self._set_buttons(True), self.refresh_table()))
+        self._worker.error.connect(self._on_action_error)
+        self._worker.start()
 
     def _on_delete(self):
         ids = self._get_selected_ids()
         if not ids:
             return
         reply = QMessageBox.question(self, "确认", f"确认删除 {len(ids)} 个任务？")
-        if reply == QMessageBox.Yes:
+        if reply != QMessageBox.Yes:
+            return
+        self._set_buttons(False)
+        self.status_label.setText("正在删除...")
+
+        def do_delete():
             for tid in ids:
                 delete_task(tid)
-            self.refresh_table()
+            return None
+
+        self._worker = TaskWorker(do_delete)
+        self._worker.finished.connect(lambda _: (self._set_buttons(True), self.status_label.setText(""), self.refresh_table()))
+        self._worker.error.connect(self._on_action_error)
+        self._worker.start()
+
+    def _on_action_error(self, msg):
+        self._set_buttons(True)
+        self.status_label.setText("")
+        QMessageBox.critical(self, "操作失败", msg)
 
     def _get_selected_ids(self):
         rows = set(idx.row() for idx in self.table.selectedIndexes())

@@ -18,6 +18,14 @@ from services.message_service import execute_task
 logger = logging.getLogger(__name__)
 
 
+def delete_group(group_id: int):
+    with get_session() as db:
+        group = db.get(Group, group_id)
+        if group:
+            db.delete(group)
+            db.commit()
+
+
 def add_group(account_id: int, tg_id: str, username: str = "", title: str = "") -> Group:
     with get_session() as db:
         existing = db.exec(select(Group).where(Group.tg_id == tg_id)).first()
