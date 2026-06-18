@@ -56,19 +56,6 @@ def health():
     return {"status": "ok", "jobs": len(scheduler.list_jobs())}
 
 
-# ── 自动部署 ──────────────────────────────────────────────────────────
-
-@app.post("/deploy", dependencies=[Depends(_auth)])
-def deploy():
-    """拉取最新代码并重启服务（由 dev_watch.py 在 git push 后调用）"""
-    import subprocess
-    # 后台执行：sleep 2 确保 HTTP 响应先发出再重启
-    subprocess.Popen(
-        "sleep 2 && git -C /home/ubuntu/qfxm pull && sudo systemctl restart qfxm",
-        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    return {"status": "deploying"}
-
 
 # ── 账号 ──────────────────────────────────────────────────────────────
 
