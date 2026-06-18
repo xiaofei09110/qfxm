@@ -176,6 +176,30 @@ def execute_task(task_id: int):
         join_status = run_async(_ensure_joined(client, chat_peer), timeout=60)
         logger.info("任务 %d 加入群组状态: %s", task_id, join_status)
 
+        # 私有群无法通过公开方式加入，直接停用任务并给出明确原因
+        if join_status == "private_group":
+            task.fail_count += 1
+            task.is_active = False
+            task.last_error = "群组为私有群/频道，账号无法通过用户名加入，请提供邀请链接后手动入群，或更换已在群内的账号"
+            db.add(task)
+            db.commit()
+            import core.scheduler as scheduler
+            scheduler.remove_task(task_id)
+            logger.warning("任务 %d 停用：%s 是私有群", task_id, chat_peer)
+            return
+
+        # join 本身就被 ban，也直接停用
+        if join_status.startswith("无法加入"):
+            task.fail_count += 1
+            task.is_active = False
+            task.last_error = f"账号无法加入群组：{join_status}"
+            db.add(task)
+            db.commit()
+            import core.scheduler as scheduler
+            scheduler.remove_task(task_id)
+            logger.warning("任务 %d 停用：%s", task_id, join_status)
+            return
+
         auto_disable = False
         try:
             run_async(safe_send(client, chat_peer, task.message_text, task.media_path), timeout=300)
