@@ -336,21 +336,28 @@ class AccountTab(QWidget):
         self.refresh_table()
 
     def _on_clean(self):
-        """一键删除失效/封号账号，保留正常账号。"""
+        """一键删除失效/封号/多地登录账号，同时删除服务器 session 文件。"""
+        CLEAN_STATUSES = {"invalid", "banned", "restricted"}
+        STATUS_DESC = {"invalid": "失效", "banned": "封号", "restricted": "多地登录"}
         accounts = list_accounts()
-        to_delete = [a for a in accounts if a.status in ("invalid", "banned")]
+        to_delete = [a for a in accounts if a.status in CLEAN_STATUSES]
         if not to_delete:
-            QMessageBox.information(self, "提示", "没有需要清理的失效/封号账号")
+            QMessageBox.information(self, "提示", "没有需要清理的账号（失效/封号/多地登录）")
             return
+        counts = {}
+        for a in to_delete:
+            counts[a.status] = counts.get(a.status, 0) + 1
+        detail = "、".join(f"{STATUS_DESC.get(s, s)} {n} 个" for s, n in counts.items())
         reply = QMessageBox.question(
             self, "确认清理",
-            f"将删除 {len(to_delete)} 个失效/封号账号，保留其余 {len(accounts)-len(to_delete)} 个。\n确认继续？"
+            f"将删除 {len(to_delete)} 个账号（{detail}），同时删除服务器上的 session 文件。\n"
+            f"保留其余 {len(accounts)-len(to_delete)} 个正常账号。\n\n确认继续？"
         )
         if reply != QMessageBox.Yes:
             return
         for acc in to_delete:
             delete_account(acc.id)
-        self.status_label.setText(f"已清理 {len(to_delete)} 个失效/封号账号")
+        self.status_label.setText(f"已清理 {len(to_delete)} 个账号（{detail}）")
         self.refresh_table()
 
     def _on_profile(self):
