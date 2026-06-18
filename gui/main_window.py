@@ -93,10 +93,12 @@ class MainWindow(QMainWindow):
     def _reload_tabs(self):
         current_index = self.tabs.currentIndex()
         try:
+            import api_client
             import gui.tabs.account_tab as m1
             import gui.tabs.group_tab   as m2
             import gui.tabs.task_tab    as m3
             import services.proxy       as mp
+            importlib.reload(api_client)
             importlib.reload(mp)
             importlib.reload(m1)
             importlib.reload(m2)
