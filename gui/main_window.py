@@ -2,9 +2,12 @@
 main_window.py
 PyQt5 主窗口。本地模式显示本地调度器状态；远程模式显示服务器状态。
 """
+import importlib
 import logging
-from PyQt5.QtWidgets import QMainWindow, QTabWidget, QStatusBar, QLabel, QAction
+from PyQt5.QtWidgets import QMainWindow, QTabWidget, QStatusBar, QLabel, QAction, QMessageBox
 from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import QShortcut
 
 from gui.tabs.account_tab import AccountTab
 from gui.tabs.group_tab import GroupTab
@@ -27,6 +30,9 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_timer)
         self._timer.start(30_000)
+
+        f5 = QShortcut(QKeySequence("F5"), self)
+        f5.activated.connect(self._reload_tabs)
 
     def _build_menu(self):
         menubar = self.menuBar()
@@ -83,6 +89,32 @@ class MainWindow(QMainWindow):
     def _on_timer(self):
         self._update_server_label()
         self.task_tab.refresh_table()
+
+    def _reload_tabs(self):
+        current_index = self.tabs.currentIndex()
+        try:
+            import gui.tabs.account_tab as m1
+            import gui.tabs.group_tab   as m2
+            import gui.tabs.task_tab    as m3
+            import services.proxy       as mp
+            importlib.reload(mp)
+            importlib.reload(m1)
+            importlib.reload(m2)
+            importlib.reload(m3)
+
+            self.tabs.clear()
+            self.account_tab = m1.AccountTab()
+            self.group_tab   = m2.GroupTab()
+            self.task_tab    = m3.TaskTab()
+            self.tabs.addTab(self.account_tab, "账号管理")
+            self.tabs.addTab(self.group_tab,   "群组管理")
+            self.tabs.addTab(self.task_tab,    "定时任务")
+            self.tabs.setCurrentIndex(current_index)
+            self.statusBar().showMessage("界面已重载", 3000)
+            logger.info("F5 重载界面成功")
+        except Exception as e:
+            logger.error("F5 重载失败: %s", e)
+            QMessageBox.critical(self, "重载失败", f"代码有错误，重载失败：\n{e}")
 
     def _open_dev_doc(self):
         import os
