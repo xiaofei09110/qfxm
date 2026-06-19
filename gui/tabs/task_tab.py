@@ -308,67 +308,121 @@ class TaskDetailDialog(QDialog):
 
 
 class SwitchAccountDialog(QDialog):
-    """选择新账号并检测同群冲突。"""
+    """选择新账号并检测同群冲突及历史失败记录。"""
 
     def __init__(self, task, accounts, all_tasks, parent=None):
         super().__init__(parent)
         self.task = task
         self.setWindowTitle(f"更换账号 — {task.name or task.id}")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        # 统计每个账号已有几个活跃任务、是否在同群
-        task_counts = {}
-        same_group_accounts = set()
+        # ── 统计数据 ──────────────────────────────────────────────────
+        task_counts = {}       # 每个账号当前活跃任务数
+        same_group_accounts = set()   # 已在此群有活跃任务的账号
+
+        # 收集此群所有任务（含停用）的 account_history，找出曾经失败过的账号
+        group_failed_accounts = set()   # 此群曾失败/被换掉的账号
+        group_tried_accounts  = set()   # 此群曾被使用的所有账号（含历史）
+
         for t in all_tasks:
             if t.is_active and t.id != task.id:
                 task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
                 if t.group_id == task.group_id:
                     same_group_accounts.add(t.account_id)
 
-        accounts_sorted = sorted(accounts, key=lambda a: task_counts.get(a.id, 0))
+            if t.group_id == task.group_id:
+                # 当前账号：如果任务停用了，视为失败账号
+                if not t.is_active:
+                    group_failed_accounts.add(t.account_id)
+                group_tried_accounts.add(t.account_id)
+                # 历史换号记录里的旧账号也算"曾用过"
+                try:
+                    history = json.loads(getattr(t, "account_history", None) or "[]")
+                    for entry in history:
+                        old_id = entry.get("old_account_id")
+                        if old_id:
+                            group_tried_accounts.add(old_id)
+                            reason = entry.get("reason", "")
+                            if "燃尽" in reason or "失败" in reason or "换号" in reason:
+                                group_failed_accounts.add(old_id)
+                except Exception:
+                    pass
 
+        # 排序：未试过的账号排前面，其次按活跃任务数
+        def sort_key(a):
+            tried = a.id in group_tried_accounts
+            failed = a.id in group_failed_accounts
+            count = task_counts.get(a.id, 0)
+            return (int(failed) * 2 + int(tried), count)
+
+        accounts_sorted = sorted(accounts, key=sort_key)
+
+        # ── UI ──────────────────────────────────────────────────────
         info = QLabel(f"当前任务：{task.name or task.id}（群组 ID={task.group_id}）")
         info.setStyleSheet("color: #666;")
         layout.addWidget(info)
 
+        legend = QLabel("标记说明：  ✅ 未在此群试过    ⚠ 此群曾被换掉    🚫 此群曾失败/被ban")
+        legend.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(legend)
+
         layout.addWidget(QLabel("选择新账号："))
         self.combo = QComboBox()
         self._accounts_list = accounts_sorted
+        self._group_failed_accounts = group_failed_accounts
+        self._group_tried_accounts  = group_tried_accounts
+        self._same_group_accounts   = same_group_accounts
+
         for acc in accounts_sorted:
             count = task_counts.get(acc.id, 0)
             name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
-            tag = "[空闲]" if count == 0 else f"[{count}个任务]"
-            self.combo.addItem(f"{name}  {tag}", acc.id)
+
+            if acc.id in group_failed_accounts:
+                badge = "🚫 此群曾失败"
+            elif acc.id in group_tried_accounts:
+                badge = "⚠ 此群曾换掉"
+            else:
+                badge = "✅ 未试过"
+
+            load = "[空闲]" if count == 0 else f"[{count}个任务]"
+            self.combo.addItem(f"{name}  {load}  {badge}", acc.id)
+
         layout.addWidget(self.combo)
 
-        self.conflict_label = QLabel()
-        self.conflict_label.setStyleSheet(
-            "color: #856404; background: #FFF3CD; border-radius: 4px; padding: 6px;"
-        )
-        self.conflict_label.setWordWrap(True)
-        self.conflict_label.setVisible(False)
-        layout.addWidget(self.conflict_label)
+        self.warn_label = QLabel()
+        self.warn_label.setWordWrap(True)
+        self.warn_label.setVisible(False)
+        layout.addWidget(self.warn_label)
 
-        self._same_group_accounts = same_group_accounts
-        self.combo.currentIndexChanged.connect(self._check_conflict)
-        self._check_conflict()
+        self.combo.currentIndexChanged.connect(self._check_warnings)
+        self._check_warnings()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _check_conflict(self):
+    def _check_warnings(self):
         acc_id = self.combo.currentData()
+        msgs = []
+        if acc_id in self._group_failed_accounts:
+            msgs.append("🚫 此账号在该群曾经失败或被ban，换过去大概率仍会失败，建议选择「未试过」的账号。")
+        elif acc_id in self._group_tried_accounts:
+            msgs.append("⚠ 此账号在该群曾被换掉过，可能存在风险。")
         if acc_id in self._same_group_accounts:
-            self.conflict_label.setText(
-                f"⚠ 此账号已有同一群组的任务，继续操作会导致同一群组有多个账号发消息。"
+            msgs.append("⚠ 此账号已有同一群组的活跃任务，会导致同群多账号发消息。")
+        if msgs:
+            style = "#F44336" if any("🚫" in m for m in msgs) else "#856404"
+            bg    = "#FFF3F3" if any("🚫" in m for m in msgs) else "#FFF3CD"
+            self.warn_label.setStyleSheet(
+                f"color: {style}; background: {bg}; border-radius: 4px; padding: 6px;"
             )
-            self.conflict_label.setVisible(True)
+            self.warn_label.setText("\n".join(msgs))
+            self.warn_label.setVisible(True)
         else:
-            self.conflict_label.setVisible(False)
+            self.warn_label.setVisible(False)
 
     def get_account_id(self) -> int:
         return self.combo.currentData()
