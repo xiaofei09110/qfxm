@@ -120,6 +120,87 @@ def import_account_folders(folder_paths: list) -> list:
     return results
 
 
+def is_flat_format(folder_path: str) -> bool:
+    """
+    检测是否为平铺格式（新格式）：.session 文件直接在目录内而非子文件夹中。
+    """
+    try:
+        for f in os.listdir(folder_path):
+            if f.endswith(".session") and not f.endswith("-journal"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def import_flat_folder(folder_path: str) -> list:
+    """
+    导入平铺格式的协议号目录（新格式）：
+    目录内 {id}.session + {id}.json 配对，无子文件夹。
+    返回与 import_account_folder 相同结构的 dict 列表。
+    """
+    folder_path = os.path.abspath(folder_path)
+    sessions: dict = {}
+    jsons: dict    = {}
+    for f in os.listdir(folder_path):
+        base, ext = os.path.splitext(f)
+        fpath = os.path.join(folder_path, f)
+        if not os.path.isfile(fpath):
+            continue
+        if ext == ".session" and not f.endswith("-journal"):
+            sessions[base] = fpath
+        elif ext == ".json":
+            jsons[base] = fpath
+
+    results = []
+    for name in sorted(set(sessions) & set(jsons)):
+        try:
+            with open(jsons[name], encoding="utf-8") as fp:
+                meta = json.load(fp)
+        except Exception as e:
+            results.append({"error": f"读取 JSON 失败: {e}", "phone": name})
+            continue
+
+        dest_session = os.path.join(SESSIONS_DIR, f"{name}.session")
+        if not os.path.exists(dest_session):
+            try:
+                shutil.copy2(sessions[name], dest_session)
+            except Exception as e:
+                results.append({"error": f"复制 session 失败: {e}", "phone": name})
+                continue
+
+        proxy = meta.get("proxy") or {}
+        two_fa = str(meta["twoFA"]) if meta.get("twoFA") else None
+
+        results.append({
+            "phone":        str(meta.get("phone", name)),
+            "session_path": os.path.abspath(dest_session),
+            "session_type": "telethon",
+            "app_id":       int(meta.get("app_id", 2040)),
+            "app_hash":     str(meta.get("app_hash", "b18441a1ff607e10a989891a5462e627")),
+            "two_fa":       two_fa,
+            "device_model": meta.get("device") or meta.get("device_model"),
+            "app_version":  meta.get("app_version"),
+            "system_lang":  meta.get("system_lang_pack") or meta.get("system_lang"),
+            "first_name":   meta.get("first_name"),
+            "last_name":    meta.get("last_name"),
+            "user_id":      meta.get("user_id") or meta.get("id"),
+            "is_premium":   bool(meta.get("is_premium", False)),
+            "spamblock":    meta.get("spamblock"),
+            "proxy_type":   proxy.get("type") if proxy else None,
+            "proxy_host":   proxy.get("host") if proxy else None,
+            "proxy_port":   proxy.get("port") if proxy else None,
+            "proxy_user":   proxy.get("user") if proxy else None,
+            "proxy_pass":   proxy.get("pass") if proxy else None,
+            "error":        "",
+        })
+        logger.info("平铺格式导入成功: %s", name)
+
+    if not results:
+        logger.warning("平铺格式目录内未找到配对的 session+json 文件: %s", folder_path)
+    return results
+
+
 def scan_parent_folder(parent_path: str) -> list:
     """
     扫描父文件夹（如 D:\桌面\协议号\），

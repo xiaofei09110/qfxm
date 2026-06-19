@@ -67,26 +67,64 @@ class ImportWorker(QThread):
 
     def run(self):
         import os
-        from api_client import _upload_folder
+        from api_client import _upload_folder, _upload_flat_folder
+
+        results = []
 
         if self.mode == "folder":
-            folders = [
-                os.path.join(self.path, name)
-                for name in sorted(os.listdir(self.path))
-                if os.path.isdir(os.path.join(self.path, name)) and name.isdigit()
-            ]
-        else:
-            folders = self.path
+            parent = self.path
+            # 检测格式：有数字子文件夹 = 旧格式；有 .session 直接在根 = 新平铺格式
+            subdirs = sorted(
+                name for name in os.listdir(parent)
+                if os.path.isdir(os.path.join(parent, name)) and name.isdigit()
+            )
+            has_sessions = any(
+                f.endswith(".session") and not f.endswith("-journal")
+                for f in os.listdir(parent)
+                if os.path.isfile(os.path.join(parent, f))
+            )
 
-        total = len(folders)
-        results = []
-        for i, folder in enumerate(folders, 1):
-            phone = os.path.basename(folder)
-            self.progress.emit(i, total, phone)
-            try:
-                results.extend(_upload_folder(folder))
-            except Exception as e:
-                results.append({"status": "failed", "phone": phone, "reason": str(e)})
+            if subdirs:
+                # 旧格式：逐个子文件夹上传
+                total = len(subdirs)
+                for i, name in enumerate(subdirs, 1):
+                    self.progress.emit(i, total, name)
+                    try:
+                        results.extend(_upload_folder(os.path.join(parent, name)))
+                    except Exception as e:
+                        results.append({"status": "failed", "phone": name, "reason": str(e)})
+            elif has_sessions:
+                # 新平铺格式：整个目录打包上传
+                self.progress.emit(1, 1, "检测到平铺格式，整体打包上传中...")
+                try:
+                    results = _upload_flat_folder(parent)
+                except Exception as e:
+                    results.append({"status": "failed", "phone": "?", "reason": str(e)})
+            else:
+                results.append({"status": "failed", "phone": "?",
+                                "reason": "未识别到协议号文件（无子文件夹也无 .session 文件）"})
+        else:
+            # 手动选择多个文件夹：逐个判断格式
+            folders = self.path
+            total = len(folders)
+            for i, folder in enumerate(folders, 1):
+                name = os.path.basename(folder)
+                self.progress.emit(i, total, name)
+                try:
+                    # 单独选择的文件夹：如果内部有 .session 文件则是平铺格式（单账号）
+                    has_s = any(
+                        f.endswith(".session") and not f.endswith("-journal")
+                        for f in os.listdir(folder)
+                        if os.path.isfile(os.path.join(folder, f))
+                    )
+                    if has_s:
+                        results.extend(_upload_folder(folder))  # 已是子文件夹，直接上传
+                    else:
+                        results.append({"status": "failed", "phone": name,
+                                        "reason": "未找到 .session 文件"})
+                except Exception as e:
+                    results.append({"status": "failed", "phone": name, "reason": str(e)})
+
         self.finished.emit(results)
 
 

@@ -92,7 +92,7 @@ def import_from_folders(folder_paths: List[str]) -> List[dict]:
 
 
 def _upload_folder(folder_path: str) -> List[dict]:
-    """打包单个协议号文件夹并上传到服务器。"""
+    """打包单个协议号文件夹（旧格式：含 session 的子文件夹）并上传到服务器。"""
     buf = io.BytesIO()
     folder_name = os.path.basename(folder_path)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -106,6 +106,29 @@ def _upload_folder(folder_path: str) -> List[dict]:
         headers=_h(),
         files={"file": (f"{folder_name}.zip", buf, "application/zip")},
         timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _upload_flat_folder(folder_path: str) -> List[dict]:
+    """
+    打包平铺格式协议号目录（新格式：所有 .session+.json 直接在一个文件夹内）并上传。
+    服务器会自动识别平铺格式并批量导入所有账号。
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(folder_path):
+            fpath = os.path.join(folder_path, fname)
+            if os.path.isfile(fpath) and not fname.endswith("-journal"):
+                zf.write(fpath, fname)   # 平铺，不加子目录层级
+    buf.seek(0)
+    folder_name = os.path.basename(folder_path)
+    r = requests.post(
+        f"{SERVER_URL}/accounts/upload",
+        headers=_h(),
+        files={"file": (f"{folder_name}_flat.zip", buf, "application/zip")},
+        timeout=300,   # 批量上传，超时设长一点
     )
     r.raise_for_status()
     return r.json()

@@ -10,7 +10,10 @@ from sqlmodel import select
 
 from database import get_session
 from models.account import Account
-from core.session_importer import import_account_folders, scan_parent_folder
+from core.session_importer import (
+    import_account_folders, scan_parent_folder,
+    import_flat_folder, is_flat_format,
+)
 from core.client_manager import client_manager
 
 logger = logging.getLogger(__name__)
@@ -69,12 +72,57 @@ def import_from_folders(folder_paths: List[str]) -> List[dict]:
 
 def import_from_parent_folder(parent_path: str) -> List[dict]:
     """
-    扫描父文件夹（如 D:\\桌面\\协议号\\），自动找出所有协议号子文件夹并批量导入。
+    扫描父文件夹，自动识别两种格式：
+    - 旧格式：含以数字命名的子文件夹，每个子文件夹一个账号
+    - 新平铺格式：.session + .json 文件直接在父文件夹内
     """
-    folders = scan_parent_folder(parent_path)
-    if not folders:
-        return [{"phone": "", "status": "failed", "reason": f"未找到协议号子文件夹: {parent_path}"}]
-    return import_from_folders(folders)
+    if is_flat_format(parent_path):
+        raw = import_flat_folder(parent_path)
+    else:
+        folders = scan_parent_folder(parent_path)
+        if not folders:
+            return [{"phone": "", "status": "failed",
+                     "reason": f"未找到协议号（无子文件夹也无 .session 文件）: {parent_path}"}]
+        raw = import_account_folders(folders)
+
+    outcomes = []
+    with get_session() as db:
+        for info in raw:
+            if info.get("error"):
+                outcomes.append({"phone": info.get("phone", "?"), "status": "failed",
+                                  "reason": info["error"]})
+                continue
+            existing = db.exec(select(Account).where(Account.phone == info["phone"])).first()
+            if existing:
+                outcomes.append({"phone": info["phone"], "status": "skipped", "reason": "已存在"})
+                continue
+            account = Account(
+                name=info["first_name"] or info["phone"],
+                phone=info["phone"],
+                session_path=info["session_path"],
+                session_type=info["session_type"],
+                app_id=info["app_id"],
+                app_hash=info["app_hash"],
+                two_fa=info["two_fa"],
+                device_model=info["device_model"],
+                app_version=info["app_version"],
+                system_lang=info["system_lang"],
+                first_name=info["first_name"],
+                last_name=info["last_name"],
+                user_id=info["user_id"],
+                is_premium=info["is_premium"],
+                spamblock=info["spamblock"],
+                proxy_type=info["proxy_type"],
+                proxy_host=info["proxy_host"],
+                proxy_port=info["proxy_port"],
+                proxy_user=info["proxy_user"],
+                proxy_pass=info["proxy_pass"],
+            )
+            db.add(account)
+            db.commit()
+            db.refresh(account)
+            outcomes.append({"phone": info["phone"], "status": "ok", "account_id": account.id})
+    return outcomes
 
 
 def check_account_status(account_id: int) -> str:

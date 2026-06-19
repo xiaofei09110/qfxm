@@ -68,22 +68,37 @@ def get_accounts(_=Depends(_auth)):
 @app.post("/accounts/upload")
 async def upload_account(file: UploadFile = File(...), _=Depends(_auth)):
     """
-    客户端把协议号文件夹打成 zip 上传，服务端解压并导入。
-    zip 内结构：手机号文件夹/（phone.session + phone.json + 2fa.txt）
+    上传协议号 zip 包，自动识别两种格式：
+    - 旧格式：zip 内含 {phone}/ 子文件夹，每个子文件夹一个账号
+    - 新格式（平铺）：zip 内直接含 {id}.session + {id}.json，无子文件夹
     """
+    from core.session_importer import import_flat_folder
     content = await file.read()
     tmpdir = tempfile.mkdtemp()
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             zf.extractall(tmpdir)
-        folders = [
+
+        # 判断格式：有数字子文件夹 = 旧格式；.session 直接在根 = 新平铺格式
+        subfolders = [
             os.path.join(tmpdir, name)
             for name in os.listdir(tmpdir)
-            if os.path.isdir(os.path.join(tmpdir, name)) and name.isdigit()
+            if os.path.isdir(os.path.join(tmpdir, name))
         ]
-        if not folders:
-            raise HTTPException(400, "zip 内未找到账号文件夹（应以手机号命名）")
-        results = import_from_folders(folders)
+        has_sessions_in_root = any(
+            f.endswith(".session") and not f.endswith("-journal")
+            for f in os.listdir(tmpdir)
+            if os.path.isfile(os.path.join(tmpdir, f))
+        )
+
+        if has_sessions_in_root:
+            # 新平铺格式
+            results = import_flat_folder(tmpdir)
+        elif subfolders:
+            # 旧子文件夹格式
+            results = import_from_folders(subfolders)
+        else:
+            raise HTTPException(400, "zip 内未识别到账号文件（请确认包含 .session 文件）")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     return results
