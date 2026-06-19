@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
     QTableWidgetItem, QFileDialog, QLabel, QHeaderView, QMessageBox,
     QProgressBar, QDialog, QFormLayout, QLineEdit, QDialogButtonBox,
+    QComboBox,
 )
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -14,8 +15,9 @@ from services.proxy import (
     import_from_parent_folder, import_from_folders,
     batch_check_status, list_accounts, delete_account,
     batch_update_profiles_gui, verify_account_spambot,
-    set_accounts_resting,
+    set_accounts_resting, set_account_owner,
 )
+from gui.owner_filter import get_owner_filter, set_owner_filter
 
 STATUS_COLORS = {
     "active":      "#4CAF50",
@@ -98,15 +100,22 @@ class CheckWorker(QThread):
 
 class CleanWorker(QThread):
     finished = pyqtSignal(int)
+    error    = pyqtSignal(str)
 
     def __init__(self, accounts):
         super().__init__()
         self.accounts = accounts
 
     def run(self):
+        failed = []
         for acc in self.accounts:
-            delete_account(acc.id)
-        self.finished.emit(len(self.accounts))
+            try:
+                delete_account(acc.id)
+            except Exception as e:
+                failed.append(str(e))
+        if failed:
+            self.error.emit(f"部分账号删除失败：{failed[0]}")
+        self.finished.emit(len(self.accounts) - len(failed))
 
 
 class RefreshWorker(QThread):
@@ -122,6 +131,7 @@ class RefreshWorker(QThread):
 
 class DeleteWorker(QThread):
     finished = pyqtSignal()
+    error    = pyqtSignal(str)
 
     def __init__(self, ids):
         super().__init__()
@@ -129,7 +139,10 @@ class DeleteWorker(QThread):
 
     def run(self):
         for aid in self.ids:
-            delete_account(aid)
+            try:
+                delete_account(aid)
+            except Exception as e:
+                self.error.emit(f"删除账号 {aid} 失败：{e}")
         self.finished.emit()
 
 
@@ -166,6 +179,23 @@ class VerifyWorker(QThread):
             except Exception as e:
                 result = f"出错: {e}"
             self.progress.emit(f"账号 {aid}：\n{result}")
+        self.finished.emit()
+
+
+class SetOwnerWorker(QThread):
+    finished = pyqtSignal()
+    error    = pyqtSignal(str)
+
+    def __init__(self, ids: list, owner: str):
+        super().__init__()
+        self.ids   = ids
+        self.owner = owner
+
+    def run(self):
+        try:
+            set_account_owner(self.ids, self.owner)
+        except Exception as e:
+            self.error.emit(str(e))
         self.finished.emit()
 
 
@@ -250,15 +280,27 @@ class AccountTab(QWidget):
         self.btn_set_resting.setStyleSheet("color: #2196F3;")
         self.btn_unrest         = QPushButton("解除养号")
         self.btn_unrest.setToolTip("将选中养号中的账号恢复正常，可重新参与任务分配")
+        self.btn_set_owner      = QPushButton("设置归属")
+        self.btn_set_owner.setToolTip("为选中账号设置归属分组标签（用于多人共用服务器时隔离账号）")
         self.btn_delete         = QPushButton("删除选中")
         self.btn_refresh        = QPushButton("刷新列表")
         for btn in [self.btn_check_selected, self.btn_check_all, self.btn_clean,
                     self.btn_profile, self.btn_spambot,
                     self.btn_set_resting, self.btn_unrest,
-                    self.btn_delete, self.btn_refresh]:
+                    self.btn_set_owner, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
+
+        # 归属分组筛选行
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("归属分组筛选："))
+        self.owner_filter_combo = QComboBox()
+        self.owner_filter_combo.setMinimumWidth(160)
+        self.owner_filter_combo.setToolTip("筛选显示指定归属的账号，同时限制验证/清理等操作范围")
+        filter_row.addWidget(self.owner_filter_combo)
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -267,9 +309,9 @@ class AccountTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
-            "ID", "手机号", "名字", "状态", "SpamBlock", "2FA", "Premium", "最后检测"
+            "ID", "手机号", "名字", "归属分组", "状态", "SpamBlock", "2FA", "Premium", "最后检测"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -285,8 +327,10 @@ class AccountTab(QWidget):
         self.btn_spambot.clicked.connect(self._on_spambot)
         self.btn_set_resting.clicked.connect(lambda: self._on_set_resting(True))
         self.btn_unrest.clicked.connect(lambda: self._on_set_resting(False))
+        self.btn_set_owner.clicked.connect(self._on_set_owner)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
+        self.owner_filter_combo.currentIndexChanged.connect(self._on_owner_filter_changed)
 
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
@@ -299,13 +343,34 @@ class AccountTab(QWidget):
 
     def _populate_table(self, accounts):
         self._accounts = accounts
-        self.table.setRowCount(len(accounts))
-        for row, acc in enumerate(accounts):
+
+        # 更新归属分组筛选 combo（保留当前选中项）
+        owners = sorted({getattr(a, "owner", "默认") or "默认" for a in accounts})
+        current_filter = self.owner_filter_combo.currentText()
+        self.owner_filter_combo.blockSignals(True)
+        self.owner_filter_combo.clear()
+        self.owner_filter_combo.addItem("全部", "")
+        for o in owners:
+            self.owner_filter_combo.addItem(o, o)
+        # 恢复之前的选项
+        idx = self.owner_filter_combo.findData(current_filter)
+        if idx >= 0:
+            self.owner_filter_combo.setCurrentIndex(idx)
+        self.owner_filter_combo.blockSignals(False)
+
+        owner_filter = self.owner_filter_combo.currentData() or ""
+        visible = [a for a in accounts if not owner_filter or getattr(a, "owner", "默认") == owner_filter]
+
+        self.table.setRowCount(len(visible))
+        for row, acc in enumerate(visible):
             self.table.setItem(row, 0, QTableWidgetItem(str(acc.id)))
             self.table.setItem(row, 1, QTableWidgetItem(acc.phone or ""))
             self.table.setItem(row, 2, QTableWidgetItem(
                 f"{acc.first_name or ''} {acc.last_name or ''}".strip()
             ))
+
+            owner = getattr(acc, "owner", "默认") or "默认"
+            self.table.setItem(row, 3, QTableWidgetItem(owner))
 
             is_resting = getattr(acc, "is_resting", False)
             if is_resting:
@@ -316,18 +381,18 @@ class AccountTab(QWidget):
                 status_color = STATUS_COLORS.get(acc.status, "#9E9E9E")
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(QColor(status_color))
-            self.table.setItem(row, 3, status_item)
+            self.table.setItem(row, 4, status_item)
 
             is_spammed = acc.spamblock and acc.spamblock.lower() not in ("free", "none", "ok", "")
             spam_item = QTableWidgetItem("正常" if not is_spammed else acc.spamblock)
             if is_spammed:
                 spam_item.setForeground(QColor("#F44336"))
-            self.table.setItem(row, 4, spam_item)
+            self.table.setItem(row, 5, spam_item)
 
-            self.table.setItem(row, 5, QTableWidgetItem("有" if acc.two_fa else "无"))
-            self.table.setItem(row, 6, QTableWidgetItem("是" if acc.is_premium else "否"))
+            self.table.setItem(row, 6, QTableWidgetItem("有" if acc.two_fa else "无"))
+            self.table.setItem(row, 7, QTableWidgetItem("是" if acc.is_premium else "否"))
             checked = acc.last_checked.strftime("%m-%d %H:%M") if acc.last_checked else "—"
-            self.table.setItem(row, 7, QTableWidgetItem(checked))
+            self.table.setItem(row, 8, QTableWidgetItem(checked))
 
     def _set_import_buttons(self, enabled: bool):
         self.btn_import_folder.setEnabled(enabled)
@@ -458,6 +523,7 @@ class AccountTab(QWidget):
         self.status_label.setText(f"正在清理 {len(to_delete)} 个账号...")
         self._clean_worker = CleanWorker(to_delete)
         self._clean_worker.finished.connect(lambda n: self._on_clean_done(n, detail))
+        self._clean_worker.error.connect(lambda e: self.status_label.setText(e))
         self._clean_worker.start()
 
     def _on_clean_done(self, count, detail):
@@ -550,6 +616,39 @@ class AccountTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "操作失败", str(e))
 
+    def _on_set_owner(self):
+        ids = self._get_selected_ids()
+        if not ids:
+            self.status_label.setText("请先选中账号行")
+            return
+        from PyQt5.QtWidgets import QInputDialog
+        # 收集已有分组作为建议
+        existing = sorted({getattr(a, "owner", "默认") or "默认" for a in self._accounts})
+        owner, ok = QInputDialog.getItem(
+            self, "设置归属分组",
+            f"为选中的 {len(ids)} 个账号设置归属分组标签：\n（可直接输入新分组名，或从下方选择已有分组）",
+            existing, editable=True,
+        )
+        if not ok or not owner.strip():
+            return
+        owner = owner.strip()
+        self.btn_set_owner.setEnabled(False)
+        self.status_label.setText(f"正在设置归属分组「{owner}」...")
+        self._set_owner_worker = SetOwnerWorker(ids, owner)
+        self._set_owner_worker.finished.connect(lambda: self._on_set_owner_done(owner, len(ids)))
+        self._set_owner_worker.error.connect(lambda e: self.status_label.setText(f"设置失败: {e}"))
+        self._set_owner_worker.start()
+
+    def _on_set_owner_done(self, owner: str, count: int):
+        self.btn_set_owner.setEnabled(True)
+        self.status_label.setText(f"已将 {count} 个账号的归属分组设为「{owner}」")
+        self.refresh_table()
+
+    def _on_owner_filter_changed(self):
+        owner = self.owner_filter_combo.currentData() or ""
+        set_owner_filter(owner)
+        self._populate_table(self._accounts)
+
     def _on_delete(self):
         ids = self._get_selected_ids()
         if not ids:
@@ -563,6 +662,7 @@ class AccountTab(QWidget):
         self.status_label.setText(f"正在删除 {len(ids)} 个账号...")
         self._delete_worker = DeleteWorker(ids)
         self._delete_worker.finished.connect(self._on_delete_done)
+        self._delete_worker.error.connect(lambda e: self.status_label.setText(e))
         self._delete_worker.start()
 
     def _on_delete_done(self):

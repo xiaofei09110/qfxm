@@ -146,8 +146,12 @@ def toggle_task(task_id: int, active: bool):
     if active:
         with get_session() as db:
             task = db.get(Task, task_id)
-            scheduler.add_task(task.id, task.cron_expr, execute_task,
-                               timezone=task.timezone)
+            if task:  # 防止两次 session 之间被删除
+                try:
+                    scheduler.add_task(task.id, task.cron_expr, execute_task,
+                                       timezone=task.timezone)
+                except Exception as e:
+                    logger.error("任务 %d 注册调度器失败: %s", task_id, e)
     else:
         scheduler.remove_task(task_id)
 
@@ -192,6 +196,17 @@ def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动
 
 def update_task_cron(task_id: int, cron_expr: str) -> Task:
     """修改任务的执行时间（cron），若任务已启用则同步更新调度器。"""
+    # 先验证 cron 格式，避免写入 DB 后调度器报错造成数据不一致
+    parts = cron_expr.strip().split()
+    if len(parts) != 5:
+        raise ValueError(f"cron 表达式格式错误：{cron_expr}（应为 5 个字段）")
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        import pytz
+        CronTrigger(*parts, timezone=pytz.timezone("UTC"))
+    except Exception as e:
+        raise ValueError(f"无效的 cron 表达式：{cron_expr}  ({e})")
+
     with get_session() as db:
         task = db.get(Task, task_id)
         if not task:
@@ -201,13 +216,17 @@ def update_task_cron(task_id: int, cron_expr: str) -> Task:
         db.commit()
         db.refresh(task)
         if task.is_active:
-            scheduler.add_task(task.id, cron_expr, execute_task, timezone=task.timezone)
+            try:
+                scheduler.add_task(task.id, cron_expr, execute_task, timezone=task.timezone)
+            except Exception as e:
+                logger.error("任务 %d 更新调度器失败: %s", task_id, e)
         return task
 
 
-def batch_auto_reassign() -> dict:
+def batch_auto_reassign(owner_filter: str = "") -> dict:
     """
     一键换号：为所有停用任务分配账号，优先选在该群从未用过的账号，将燃尽账号标为养号中。
+    owner_filter: 若非空，只从该归属分组的账号中选取。
     返回 {"reassigned": int, "rested": list[int], "no_accounts": bool}
     """
     from models.account import Account
@@ -225,9 +244,13 @@ def batch_auto_reassign() -> dict:
         to_rest = stopped_account_ids - active_account_ids
 
         all_accounts = db.exec(select(Account)).all()
-        # 可用账号：非养号中、且当前未被停用任务占用
-        available = [a for a in all_accounts
-                     if not a.is_resting and a.id not in stopped_account_ids]
+        # 可用账号：非养号中、未被停用任务占用、符合归属分组筛选
+        available = [
+            a for a in all_accounts
+            if not a.is_resting
+            and a.id not in stopped_account_ids
+            and (not owner_filter or a.owner == owner_filter)
+        ]
 
         if not available:
             return {"reassigned": 0, "rested": [], "no_accounts": True}
@@ -289,7 +312,10 @@ def batch_auto_reassign() -> dict:
 
     with get_session() as db:
         for t in db.exec(select(Task).where(Task.is_active == True)).all():
-            scheduler.add_task(t.id, t.cron_expr, execute_task, timezone=t.timezone)
+            try:
+                scheduler.add_task(t.id, t.cron_expr, execute_task, timezone=t.timezone)
+            except Exception as e:
+                logger.error("一键换号后注册任务 %d 失败: %s", t.id, e)
 
     return {"reassigned": reassigned, "rested": rested_ids, "no_accounts": False}
 

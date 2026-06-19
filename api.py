@@ -22,6 +22,7 @@ from services.account_service import (
     delete_account,
     import_from_folders,
     list_accounts,
+    set_account_owner,
 )
 from services.group_service import (
     add_group,
@@ -113,10 +114,25 @@ def set_resting_ep(req: RestingRequest, _=Depends(_auth)):
     return {"ok": True}
 
 
+class OwnerRequest(BaseModel):
+    account_ids: List[int]
+    owner: str
+
+
+@app.post("/accounts/owner")
+def set_owner_ep(req: OwnerRequest, _=Depends(_auth)):
+    set_account_owner(req.account_ids, req.owner)
+    return {"ok": True}
+
+
+class AutoReassignRequest(BaseModel):
+    owner_filter: str = ""
+
+
 @app.post("/tasks/auto_reassign")
-def auto_reassign_ep(_=Depends(_auth)):
+def auto_reassign_ep(req: AutoReassignRequest, _=Depends(_auth)):
     from services.group_service import batch_auto_reassign
-    return batch_auto_reassign()
+    return batch_auto_reassign(owner_filter=req.owner_filter)
 
 
 @app.post("/accounts/{account_id}/verify")

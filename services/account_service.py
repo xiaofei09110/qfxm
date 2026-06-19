@@ -114,6 +114,17 @@ def list_accounts() -> List[Account]:
         return db.exec(select(Account)).all()
 
 
+def set_account_owner(account_ids: List[int], owner: str):
+    """设置账号归属分组标签。"""
+    with get_session() as db:
+        for aid in account_ids:
+            acc = db.get(Account, aid)
+            if acc:
+                acc.owner = owner
+                db.add(acc)
+        db.commit()
+
+
 def set_accounts_resting(account_ids: List[int], resting: bool = True):
     with get_session() as db:
         for aid in account_ids:

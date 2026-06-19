@@ -18,6 +18,7 @@ from services.proxy import (
     create_task, delete_task, toggle_task, list_tasks, list_groups,
     list_accounts, switch_task_account, update_task_cron, batch_auto_reassign,
 )
+from gui.owner_filter import get_owner_filter
 from config import SERVER_URL
 
 
@@ -816,6 +817,20 @@ class TaskTab(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # 归属分组筛选（限定新建任务/批量分配/一键换号时的账号池）
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("账号归属筛选："))
+        self.owner_filter_combo = QComboBox()
+        self.owner_filter_combo.setMinimumWidth(160)
+        self.owner_filter_combo.setToolTip(
+            "新建任务/批量分配/一键换号时，只从该归属分组的账号中选取\n"
+            "（在「账号管理」中设置账号归属后此处会自动出现选项）"
+        )
+        self.owner_filter_combo.addItem("全部账号", "")
+        filter_row.addWidget(self.owner_filter_combo)
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
@@ -904,6 +919,26 @@ class TaskTab(QWidget):
         ))
         self._fetch_worker.start()
 
+    def _refresh_owner_combo(self, accounts):
+        """用账号列表更新归属分组筛选 combo。"""
+        owners = sorted({getattr(a, "owner", "默认") or "默认" for a in accounts})
+        current = self.owner_filter_combo.currentData()
+        self.owner_filter_combo.blockSignals(True)
+        self.owner_filter_combo.clear()
+        self.owner_filter_combo.addItem("全部账号", "")
+        for o in owners:
+            self.owner_filter_combo.addItem(o, o)
+        idx = self.owner_filter_combo.findData(current)
+        if idx >= 0:
+            self.owner_filter_combo.setCurrentIndex(idx)
+        self.owner_filter_combo.blockSignals(False)
+
+    def _filter_accounts_by_owner(self, accounts: list) -> list:
+        owner = self.owner_filter_combo.currentData() or ""
+        if not owner:
+            return accounts
+        return [a for a in accounts if getattr(a, "owner", "默认") == owner]
+
     def _on_fetch_done(self, result):
         self._set_buttons(True)
         self.status_label.setText("")
@@ -913,6 +948,12 @@ class TaskTab(QWidget):
             return
         if not groups:
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
+            return
+
+        self._refresh_owner_combo(accounts)
+        accounts = self._filter_accounts_by_owner(accounts)
+        if not accounts:
+            QMessageBox.warning(self, "提示", "当前归属分组筛选下没有可用账号，请在「账号管理」设置账号归属或切换「全部账号」")
             return
 
         # 统计每个账号当前任务数，空闲账号排前面
@@ -1014,6 +1055,12 @@ class TaskTab(QWidget):
             return
         if not groups:
             QMessageBox.warning(self, "提示", "请先在「群组管理」添加目标群组")
+            return
+
+        self._refresh_owner_combo(accounts)
+        accounts = self._filter_accounts_by_owner(accounts)
+        if not accounts:
+            QMessageBox.warning(self, "提示", "当前归属分组筛选下没有可用账号，请在「账号管理」设置账号归属或切换「全部账号」")
             return
 
         task_counts = {}        # 每个账号的活跃任务数
@@ -1140,9 +1187,11 @@ class TaskTab(QWidget):
         if not stopped:
             self.status_label.setText("没有停用的任务，无需换号")
             return
+        owner_filter = self.owner_filter_combo.currentData() or ""
+        owner_tip = f"（仅使用「{owner_filter}」分组账号）" if owner_filter else ""
         reply = QMessageBox.question(
             self, "一键换号",
-            f"发现 {len(stopped)} 个停用任务。\n\n"
+            f"发现 {len(stopped)} 个停用任务。{owner_tip}\n\n"
             "操作内容：\n"
             "① 为每个停用任务分配一个空闲账号\n"
             "② 将原来燃尽的账号标为「养号中」\n"
@@ -1153,7 +1202,7 @@ class TaskTab(QWidget):
             return
         self._set_buttons(False)
         self.status_label.setText("正在一键换号...")
-        self._auto_switch_worker = TaskWorker(batch_auto_reassign)
+        self._auto_switch_worker = TaskWorker(batch_auto_reassign, owner_filter=owner_filter)
         self._auto_switch_worker.finished.connect(self._on_auto_switch_done)
         self._auto_switch_worker.error.connect(self._on_action_error)
         self._auto_switch_worker.start()

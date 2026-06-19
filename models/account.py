@@ -34,6 +34,7 @@ class Account(SQLModel, table=True):
     last_checked: Optional[datetime] = None
     error_msg: Optional[str] = None
     is_resting: bool = Field(default=False)  # 养号中，暂不参与任务分配
+    owner: str = Field(default="默认")       # 归属分组标签，用于多人共用服务器时隔离账号
 
     # 代理（可选）
     proxy_type: Optional[str] = None

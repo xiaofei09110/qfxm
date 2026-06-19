@@ -133,8 +133,12 @@ def set_accounts_resting(account_ids: List[int], resting: bool = True):
     _post("/accounts/resting", json={"account_ids": account_ids, "resting": resting})
 
 
-def batch_auto_reassign() -> dict:
-    return _post("/tasks/auto_reassign")
+def set_account_owner(account_ids: List[int], owner: str):
+    _post("/accounts/owner", json={"account_ids": account_ids, "owner": owner})
+
+
+def batch_auto_reassign(owner_filter: str = "") -> dict:
+    return _post("/tasks/auto_reassign", json={"owner_filter": owner_filter})
 
 
 def verify_account_spambot(account_id: int) -> str:

@@ -314,13 +314,15 @@ def verify_group_join(account_id: int, group_id: int) -> str:
         db.commit()
 
     if reactivated:
-        # 重新注册到调度器
         with get_session() as db:
             for tid in reactivated:
                 task = db.get(Task, tid)
                 if task:
-                    scheduler.add_task(task.id, task.cron_expr, execute_task,
-                                       timezone=task.timezone)
+                    try:
+                        scheduler.add_task(task.id, task.cron_expr, execute_task,
+                                           timezone=task.timezone)
+                    except Exception as e:
+                        logger.error("重新注册任务 %d 失败: %s", tid, e)
         result += f"\n\n✅ 已重新激活任务：{reactivated}"
     else:
         result += "\n\n（未找到因验证停用的任务，请手动启用）"

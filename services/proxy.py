@@ -16,6 +16,7 @@ if IS_REMOTE:
         import_from_folders,
         batch_check_status,
         set_accounts_resting,
+        set_account_owner,
         batch_auto_reassign,
         verify_account_spambot,
         verify_group_join,
@@ -45,6 +46,7 @@ else:
         import_from_folders,
         batch_check_status,
         set_accounts_resting,
+        set_account_owner,
         delete_account,
     )
     from services.group_service import batch_auto_reassign  # noqa

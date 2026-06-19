@@ -33,6 +33,10 @@ def _migrate_db():
             conn.execute(sqlalchemy.text("ALTER TABLE accounts ADD COLUMN is_resting INTEGER DEFAULT 0 NOT NULL"))
             conn.commit()
             logger.info("DB migration: added column accounts.is_resting")
+        if "owner" not in acc_cols:
+            conn.execute(sqlalchemy.text("ALTER TABLE accounts ADD COLUMN owner TEXT DEFAULT '默认' NOT NULL"))
+            conn.commit()
+            logger.info("DB migration: added column accounts.owner")
 
 
 def get_session():
