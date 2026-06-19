@@ -102,8 +102,14 @@ def create_task(
 ) -> Task:
     """
     创建定时消息任务并注册到调度器。
+    任务的 owner 继承自所选账号的归属分组，用于约束后续自动换号范围。
     """
+    from models.account import Account
     with get_session() as db:
+        # 继承账号的归属分组
+        acc = db.get(Account, account_id)
+        task_owner = (acc.owner or "默认") if acc else "默认"
+
         init_history = json.dumps([{
             "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "account_id": account_id,
@@ -119,6 +125,7 @@ def create_task(
             timezone=timezone,
             media_path=media_path,
             account_history=init_history,
+            owner=task_owner,
         )
         db.add(task)
         db.commit()
@@ -171,11 +178,17 @@ def list_tasks() -> List[Task]:
 
 
 def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动更换") -> Task:
-    """更换任务绑定的账号，并将换号记录追加到 account_history。"""
+    """更换任务绑定的账号，并将换号记录追加到 account_history。
+    同步更新 task.owner 为新账号的归属分组（保持数据一致性）。
+    """
+    from models.account import Account
     with get_session() as db:
         task = db.get(Task, task_id)
         if not task:
             raise ValueError(f"任务 {task_id} 不存在")
+
+        new_acc = db.get(Account, new_account_id)
+        new_owner = (new_acc.owner or "默认") if new_acc else task.owner
 
         history = json.loads(task.account_history or "[]")
         history.append({
@@ -187,7 +200,8 @@ def switch_task_account(task_id: int, new_account_id: int, reason: str = "手动
 
         task.account_id = new_account_id
         task.account_history = json.dumps(history, ensure_ascii=False)
-        task.last_error = None  # 换号后清空上次错误
+        task.last_error = None
+        task.owner = new_owner   # 同步归属分组
         db.add(task)
         db.commit()
         db.refresh(task)
@@ -223,45 +237,48 @@ def update_task_cron(task_id: int, cron_expr: str) -> Task:
         return task
 
 
-def batch_auto_reassign(owner_filter: str = "") -> dict:
+def batch_auto_reassign() -> dict:
     """
-    一键换号：为所有停用任务分配账号，优先选在该群从未用过的账号，将燃尽账号标为养号中。
-    owner_filter: 若非空，只从该归属分组的账号中选取。
-    返回 {"reassigned": int, "rested": list[int], "no_accounts": bool}
+    一键换号：按每个任务自身的 owner 归属分组分配账号，严格隔离不同分组的账号池。
+    - 每个任务只会被分配到与自己 owner 相同的账号，绝不跨组。
+    - 若某个任务所属分组内无可用账号，该任务跳过（skipped 列表）。
+    返回 {"reassigned": int, "rested": list[int], "skipped": list[int], "no_accounts": bool}
     """
     from models.account import Account
 
     with get_session() as db:
-        all_tasks    = db.exec(select(Task)).all()
+        all_tasks     = db.exec(select(Task)).all()
         stopped_tasks = [t for t in all_tasks if not t.is_active]
         active_tasks  = [t for t in all_tasks if t.is_active]
 
         if not stopped_tasks:
-            return {"reassigned": 0, "rested": [], "no_accounts": False}
+            return {"reassigned": 0, "rested": [], "skipped": [], "no_accounts": False}
 
         stopped_account_ids = set(t.account_id for t in stopped_tasks)
         active_account_ids  = set(t.account_id for t in active_tasks)
         to_rest = stopped_account_ids - active_account_ids
 
         all_accounts = db.exec(select(Account)).all()
-        # 可用账号：非养号中、未被停用任务占用、符合归属分组筛选
-        available = [
+        # 全局可用账号池（非养号中、未被停用任务占用）
+        all_available = [
             a for a in all_accounts
-            if not a.is_resting
-            and a.id not in stopped_account_ids
-            and (not owner_filter or a.owner == owner_filter)
+            if not a.is_resting and a.id not in stopped_account_ids
         ]
 
-        if not available:
-            return {"reassigned": 0, "rested": [], "no_accounts": True}
+        # 按 owner 分桶
+        pool_by_owner: dict = {}   # {owner: [Account]}
+        for a in all_available:
+            o = a.owner or "默认"
+            pool_by_owner.setdefault(o, []).append(a)
 
-        # 按群组维度统计历史上用过哪些账号（从 account_history 解析）
-        group_tried: dict = {}   # {group_id: set of account_ids tried in this group}
+        if not all_available:
+            return {"reassigned": 0, "rested": [], "skipped": [], "no_accounts": True}
+
+        # 按群组维度统计历史上用过哪些账号
+        group_tried: dict = {}
         for t in all_tasks:
             gid = t.group_id
-            if gid not in group_tried:
-                group_tried[gid] = set()
-            group_tried[gid].add(t.account_id)
+            group_tried.setdefault(gid, set()).add(t.account_id)
             try:
                 for entry in json.loads(t.account_history or "[]"):
                     aid = entry.get("account_id")
@@ -275,13 +292,23 @@ def batch_auto_reassign(owner_filter: str = "") -> dict:
             task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
 
         reassigned = 0
+        skipped    = []
+
         for task in stopped_tasks:
+            task_owner = task.owner or "默认"
+            owner_pool = pool_by_owner.get(task_owner, [])
+
+            if not owner_pool:
+                # 该分组内没有可用账号，跳过，不跨组
+                skipped.append(task.id)
+                logger.warning("一键换号：任务 %d (owner=%s) 无可用账号，跳过", task.id, task_owner)
+                continue
+
             gid   = task.group_id
             tried = group_tried.get(gid, set())
 
-            # 优先选此群从未用过的账号，次选任务数最少的
-            fresh = [a for a in available if a.id not in tried]
-            pool  = fresh if fresh else available
+            fresh = [a for a in owner_pool if a.id not in tried]
+            pool  = fresh if fresh else owner_pool
             best  = min(pool, key=lambda a: task_counts.get(a.id, 0))
 
             history = json.loads(task.account_history or "[]")
@@ -292,6 +319,7 @@ def batch_auto_reassign(owner_filter: str = "") -> dict:
                 "reason": "一键换号（账号燃尽）",
             })
             task.account_id      = best.id
+            task.owner           = best.owner or "默认"
             task.account_history = json.dumps(history, ensure_ascii=False)
             task.last_error      = None
             task.is_active       = True
@@ -317,7 +345,7 @@ def batch_auto_reassign(owner_filter: str = "") -> dict:
             except Exception as e:
                 logger.error("一键换号后注册任务 %d 失败: %s", t.id, e)
 
-    return {"reassigned": reassigned, "rested": rested_ids, "no_accounts": False}
+    return {"reassigned": reassigned, "rested": rested_ids, "skipped": skipped, "no_accounts": False}
 
 
 def restore_all_tasks():

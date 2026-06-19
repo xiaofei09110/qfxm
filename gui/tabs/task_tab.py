@@ -309,23 +309,23 @@ class TaskDetailDialog(QDialog):
 
 
 class SwitchAccountDialog(QDialog):
-    """选择新账号并检测同群冲突及历史失败记录。"""
+    """选择新账号并检测同群冲突、历史失败记录及跨分组风险。"""
 
     def __init__(self, task, accounts, all_tasks, parent=None):
         super().__init__(parent)
         self.task = task
         self.setWindowTitle(f"更换账号 — {task.name or task.id}")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        # ── 统计数据 ──────────────────────────────────────────────────
-        task_counts = {}       # 每个账号当前活跃任务数
-        same_group_accounts = set()   # 已在此群有活跃任务的账号
+        task_owner = getattr(task, "owner", "默认") or "默认"
 
-        # 收集此群所有任务（含停用）的 account_history，找出曾经失败过的账号
-        group_failed_accounts = set()   # 此群曾失败/被换掉的账号
-        group_tried_accounts  = set()   # 此群曾被使用的所有账号（含历史）
+        # ── 统计数据 ──────────────────────────────────────────────────
+        task_counts         = {}
+        same_group_accounts = set()
+        group_failed_accounts = set()
+        group_tried_accounts  = set()
 
         for t in all_tasks:
             if t.is_active and t.id != task.id:
@@ -334,11 +334,9 @@ class SwitchAccountDialog(QDialog):
                     same_group_accounts.add(t.account_id)
 
             if t.group_id == task.group_id:
-                # 当前账号：如果任务停用了，视为失败账号
                 if not t.is_active:
                     group_failed_accounts.add(t.account_id)
                 group_tried_accounts.add(t.account_id)
-                # 历史换号记录里的旧账号也算"曾用过"
                 try:
                     history = json.loads(getattr(t, "account_history", None) or "[]")
                     for entry in history:
@@ -351,44 +349,54 @@ class SwitchAccountDialog(QDialog):
                 except Exception:
                     pass
 
-        # 排序：未试过的账号排前面，其次按活跃任务数
+        # 排序：同分组优先，其次未试过，再次任务数少
         def sort_key(a):
-            tried = a.id in group_tried_accounts
-            failed = a.id in group_failed_accounts
-            count = task_counts.get(a.id, 0)
-            return (int(failed) * 2 + int(tried), count)
+            acc_owner = getattr(a, "owner", "默认") or "默认"
+            cross     = int(acc_owner != task_owner)          # 跨分组排最后
+            failed    = int(a.id in group_failed_accounts)
+            tried     = int(a.id in group_tried_accounts)
+            count     = task_counts.get(a.id, 0)
+            return (cross, failed * 2 + tried, count)
 
         accounts_sorted = sorted(accounts, key=sort_key)
 
         # ── UI ──────────────────────────────────────────────────────
-        info = QLabel(f"当前任务：{task.name or task.id}（群组 ID={task.group_id}）")
+        info = QLabel(f"当前任务：{task.name or task.id}（群组 ID={task.group_id}，归属：{task_owner}）")
         info.setStyleSheet("color: #666;")
         layout.addWidget(info)
 
-        legend = QLabel("标记说明：  ✅ 未在此群试过    ⚠ 此群曾被换掉    🚫 此群曾失败/被ban")
+        legend = QLabel(
+            "标记说明：  ✅ 未在此群试过    ⚠ 此群曾被换掉    🚫 此群曾失败\n"
+            "          ⛔ 跨归属分组（请勿选用，账号不属于你）"
+        )
         legend.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(legend)
 
         layout.addWidget(QLabel("选择新账号："))
         self.combo = QComboBox()
-        self._accounts_list = accounts_sorted
+        self._accounts_list       = accounts_sorted
         self._group_failed_accounts = group_failed_accounts
         self._group_tried_accounts  = group_tried_accounts
         self._same_group_accounts   = same_group_accounts
+        self._task_owner            = task_owner
 
         for acc in accounts_sorted:
+            acc_owner = getattr(acc, "owner", "默认") or "默认"
             count = task_counts.get(acc.id, 0)
-            name = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+            name  = (acc.first_name or acc.phone or f"id={acc.id}").strip()
+            cross = acc_owner != task_owner
 
-            if acc.id in group_failed_accounts:
-                badge = "🚫 此群曾失败"
+            if cross:
+                group_badge = f"⛔ 跨分组[{acc_owner}]"
+            elif acc.id in group_failed_accounts:
+                group_badge = "🚫 此群曾失败"
             elif acc.id in group_tried_accounts:
-                badge = "⚠ 此群曾换掉"
+                group_badge = "⚠ 此群曾换掉"
             else:
-                badge = "✅ 未试过"
+                group_badge = "✅ 未试过"
 
             load = "[空闲]" if count == 0 else f"[{count}个任务]"
-            self.combo.addItem(f"{name}  {load}  {badge}", acc.id)
+            self.combo.addItem(f"{name}  {load}  {group_badge}", acc.id)
 
         layout.addWidget(self.combo)
 
@@ -407,18 +415,31 @@ class SwitchAccountDialog(QDialog):
 
     def _check_warnings(self):
         acc_id = self.combo.currentData()
+        acc = next((a for a in self._accounts_list if a.id == acc_id), None)
+        acc_owner = (getattr(acc, "owner", "默认") or "默认") if acc else "默认"
         msgs = []
-        if acc_id in self._group_failed_accounts:
+
+        if acc_owner != self._task_owner:
+            msgs.append(
+                f"⛔ 此账号归属「{acc_owner}」，当前任务归属「{self._task_owner}」——这是跨分组操作！\n"
+                "   强烈不建议选用：此账号可能属于你的合伙人，确认后任务归属也会被改为对方分组。"
+            )
+        elif acc_id in self._group_failed_accounts:
             msgs.append("🚫 此账号在该群曾经失败或被ban，换过去大概率仍会失败，建议选择「未试过」的账号。")
         elif acc_id in self._group_tried_accounts:
             msgs.append("⚠ 此账号在该群曾被换掉过，可能存在风险。")
+
         if acc_id in self._same_group_accounts:
             msgs.append("⚠ 此账号已有同一群组的活跃任务，会导致同群多账号发消息。")
+
         if msgs:
-            style = "#F44336" if any("🚫" in m for m in msgs) else "#856404"
-            bg    = "#FFF3F3" if any("🚫" in m for m in msgs) else "#FFF3CD"
+            is_critical = any("⛔" in m for m in msgs)
+            is_red      = is_critical or any("🚫" in m for m in msgs)
+            style = "#B71C1C" if is_critical else ("#F44336" if is_red else "#856404")
+            bg    = "#FFEBEE" if is_red else "#FFF3CD"
             self.warn_label.setStyleSheet(
-                f"color: {style}; background: {bg}; border-radius: 4px; padding: 6px;"
+                f"color: {style}; background: {bg}; border-radius: 4px; padding: 8px;"
+                " border: 1px solid currentColor;"
             )
             self.warn_label.setText("\n".join(msgs))
             self.warn_label.setVisible(True)
@@ -817,16 +838,18 @@ class TaskTab(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        # 归属分组筛选（限定新建任务/批量分配/一键换号时的账号池）
+        # 分组筛选：过滤任务列表 + 限定新建任务时的账号选择范围
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("账号归属筛选："))
+        filter_row.addWidget(QLabel("分组筛选："))
         self.owner_filter_combo = QComboBox()
         self.owner_filter_combo.setMinimumWidth(160)
         self.owner_filter_combo.setToolTip(
-            "新建任务/批量分配/一键换号时，只从该归属分组的账号中选取\n"
-            "（在「账号管理」中设置账号归属后此处会自动出现选项）"
+            "筛选仅显示该归属分组的任务。\n"
+            "新建任务/批量分配时，也只列出该分组的账号供选择。\n"
+            "一键换号已在数据层按每个任务自身归属隔离，无需此处设置。"
         )
-        self.owner_filter_combo.addItem("全部账号", "")
+        self.owner_filter_combo.addItem("全部", "")
+        self.owner_filter_combo.currentIndexChanged.connect(self._on_owner_filter_changed)
         filter_row.addWidget(self.owner_filter_combo)
         filter_row.addStretch()
         layout.addLayout(filter_row)
@@ -834,9 +857,9 @@ class TaskTab(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels([
-            "ID", "名称", "账号ID", "群组ID", "执行计划", "状态", "下次执行", "执行/失败", "最近错误"
+            "ID", "名称", "归属", "账号ID", "群组ID", "执行计划", "状态", "下次执行", "执行/失败", "最近错误"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -853,6 +876,9 @@ class TaskTab(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_table)
         self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
 
+    def _on_owner_filter_changed(self):
+        self._populate_table(list(self._tasks.values()))
+
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
             return
@@ -864,8 +890,26 @@ class TaskTab(QWidget):
 
     def _populate_table(self, tasks):
         self._tasks = {t.id: t for t in tasks}
-        self.table.setRowCount(len(tasks))
-        for row, task in enumerate(tasks):
+
+        # 更新分组筛选 combo
+        owners = sorted({getattr(t, "owner", "默认") or "默认" for t in tasks})
+        current_owner = self.owner_filter_combo.currentData() or ""
+        self.owner_filter_combo.blockSignals(True)
+        self.owner_filter_combo.clear()
+        self.owner_filter_combo.addItem("全部", "")
+        for o in owners:
+            self.owner_filter_combo.addItem(o, o)
+        idx = self.owner_filter_combo.findData(current_owner)
+        if idx >= 0:
+            self.owner_filter_combo.setCurrentIndex(idx)
+        self.owner_filter_combo.blockSignals(False)
+
+        owner_filter = self.owner_filter_combo.currentData() or ""
+        visible = [t for t in tasks
+                   if not owner_filter or (getattr(t, "owner", "默认") or "默认") == owner_filter]
+
+        self.table.setRowCount(len(visible))
+        for row, task in enumerate(visible):
             if hasattr(task, "next_run_str"):
                 next_str = task.next_run_str or "未注册"
             else:
@@ -873,22 +917,30 @@ class TaskTab(QWidget):
                 next_run = scheduler.get_next_run(task.id)
                 next_str = next_run.strftime("%m-%d %H:%M") if next_run else "未注册"
 
+            task_owner = getattr(task, "owner", "默认") or "默认"
+
             self.table.setItem(row, 0, QTableWidgetItem(str(task.id)))
             self.table.setItem(row, 1, QTableWidgetItem(task.name or ""))
-            self.table.setItem(row, 2, QTableWidgetItem(str(task.account_id)))
-            self.table.setItem(row, 3, QTableWidgetItem(str(task.group_id)))
-            self.table.setItem(row, 4, QTableWidgetItem(_cron_to_human(task.cron_expr)))
+
+            owner_item = QTableWidgetItem(task_owner)
+            owner_item.setForeground(QColor("#1565C0"))
+            font = owner_item.font(); font.setBold(True); owner_item.setFont(font)
+            self.table.setItem(row, 2, owner_item)
+
+            self.table.setItem(row, 3, QTableWidgetItem(str(task.account_id)))
+            self.table.setItem(row, 4, QTableWidgetItem(str(task.group_id)))
+            self.table.setItem(row, 5, QTableWidgetItem(_cron_to_human(task.cron_expr)))
 
             active_item = QTableWidgetItem("启用" if task.is_active else "停用")
             active_item.setForeground(QColor("#4CAF50" if task.is_active else "#9E9E9E"))
-            self.table.setItem(row, 5, active_item)
+            self.table.setItem(row, 6, active_item)
 
             next_item = QTableWidgetItem(next_str)
             if task.is_active and next_str == "未注册":
                 next_item.setForeground(QColor("#FF9800"))
-            self.table.setItem(row, 6, next_item)
+            self.table.setItem(row, 7, next_item)
 
-            self.table.setItem(row, 7, QTableWidgetItem(
+            self.table.setItem(row, 8, QTableWidgetItem(
                 f"{task.run_count}/{task.fail_count}"
             ))
 
@@ -896,7 +948,7 @@ class TaskTab(QWidget):
             err_item = QTableWidgetItem(last_error)
             if last_error:
                 err_item.setForeground(QColor("#F44336"))
-            self.table.setItem(row, 8, err_item)
+            self.table.setItem(row, 9, err_item)
 
     def _set_buttons(self, enabled: bool):
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
@@ -1187,13 +1239,20 @@ class TaskTab(QWidget):
         if not stopped:
             self.status_label.setText("没有停用的任务，无需换号")
             return
-        owner_filter = self.owner_filter_combo.currentData() or ""
-        owner_tip = f"（仅使用「{owner_filter}」分组账号）" if owner_filter else ""
+
+        # 按归属分组汇总，让用户知道各组各有几个停用任务
+        by_owner = {}
+        for t in stopped:
+            o = getattr(t, "owner", "默认") or "默认"
+            by_owner[o] = by_owner.get(o, 0) + 1
+        owner_summary = "\n".join(f"  • {o}：{n} 个任务" for o, n in sorted(by_owner.items()))
+
         reply = QMessageBox.question(
             self, "一键换号",
-            f"发现 {len(stopped)} 个停用任务。{owner_tip}\n\n"
+            f"发现 {len(stopped)} 个停用任务，将按各自归属分组分配空闲账号：\n{owner_summary}\n\n"
+            "系统保证每个任务只会被分配到同一归属分组的账号，不会跨组。\n\n"
             "操作内容：\n"
-            "① 为每个停用任务分配一个空闲账号\n"
+            "① 按归属分组为每个停用任务分配空闲账号\n"
             "② 将原来燃尽的账号标为「养号中」\n"
             "③ 自动重新启用这些任务\n\n"
             "确认执行？"
@@ -1202,7 +1261,7 @@ class TaskTab(QWidget):
             return
         self._set_buttons(False)
         self.status_label.setText("正在一键换号...")
-        self._auto_switch_worker = TaskWorker(batch_auto_reassign, owner_filter=owner_filter)
+        self._auto_switch_worker = TaskWorker(batch_auto_reassign)
         self._auto_switch_worker.finished.connect(self._on_auto_switch_done)
         self._auto_switch_worker.error.connect(self._on_action_error)
         self._auto_switch_worker.start()
@@ -1212,16 +1271,20 @@ class TaskTab(QWidget):
         if result.get("no_accounts"):
             QMessageBox.warning(
                 self, "无可用账号",
-                "没有空闲账号可分配！\n"
-                "请先在「账号管理」导入新账号，或解除部分账号的养号状态。"
+                "所有停用任务的归属分组内均无空闲账号！\n"
+                "请先在「账号管理」导入新账号（设置正确的归属分组），\n"
+                "或解除部分账号的养号状态。"
             )
             self.status_label.setText("换号失败：无可用账号")
             return
-        n = result.get("reassigned", 0)
-        r = len(result.get("rested", []))
-        self.status_label.setText(
-            f"一键换号完成：{n} 个任务已重新分配并启用，{r} 个燃尽账号已标为养号中"
-        )
+        n       = result.get("reassigned", 0)
+        r       = len(result.get("rested", []))
+        skipped = result.get("skipped", [])
+        msg = f"一键换号完成：{n} 个任务已重新分配并启用，{r} 个燃尽账号已标为养号中"
+        if skipped:
+            msg += f"\n⚠ {len(skipped)} 个任务因本组无空闲账号被跳过（任务ID：{skipped}）"
+            QMessageBox.warning(self, "部分任务跳过", msg)
+        self.status_label.setText(msg.split("\n")[0])
         self.refresh_table()
 
     def _on_reschedule(self):

@@ -18,6 +18,8 @@ class Task(SQLModel, table=True):
     cron_expr: str = Field(description="cron表达式")
     timezone: str = Field(default="Asia/Shanghai")
 
+    owner: str = Field(default="默认")       # 归属分组，继承自创建时使用的账号，约束自动换号范围
+
     is_active: bool = Field(default=True)
     last_run: Optional[datetime] = None
     next_run: Optional[datetime] = None

@@ -27,6 +27,10 @@ def _migrate_db():
             conn.execute(sqlalchemy.text("ALTER TABLE tasks ADD COLUMN account_history TEXT"))
             conn.commit()
             logger.info("DB migration: added column tasks.account_history")
+        if "owner" not in cols:
+            conn.execute(sqlalchemy.text("ALTER TABLE tasks ADD COLUMN owner TEXT DEFAULT '默认' NOT NULL"))
+            conn.commit()
+            logger.info("DB migration: added column tasks.owner")
 
         acc_cols = {row[1] for row in conn.execute(sqlalchemy.text("PRAGMA table_info(accounts)"))}
         if "is_resting" not in acc_cols:
