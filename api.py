@@ -101,6 +101,24 @@ def remove_account(account_id: int, _=Depends(_auth)):
     return {"ok": True}
 
 
+class RestingRequest(BaseModel):
+    account_ids: List[int]
+    resting: bool = True
+
+
+@app.post("/accounts/resting")
+def set_resting_ep(req: RestingRequest, _=Depends(_auth)):
+    from services.account_service import set_accounts_resting
+    set_accounts_resting(req.account_ids, req.resting)
+    return {"ok": True}
+
+
+@app.post("/tasks/auto_reassign")
+def auto_reassign_ep(_=Depends(_auth)):
+    from services.group_service import batch_auto_reassign
+    return batch_auto_reassign()
+
+
 @app.post("/accounts/{account_id}/verify")
 def spambot_verify_ep(account_id: int, _=Depends(_auth)):
     """让账号自动与 @SpamBot 交互完成申诉流程。"""

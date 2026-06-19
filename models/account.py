@@ -33,6 +33,7 @@ class Account(SQLModel, table=True):
     status: str = Field(default="unknown")
     last_checked: Optional[datetime] = None
     error_msg: Optional[str] = None
+    is_resting: bool = Field(default=False)  # 养号中，暂不参与任务分配
 
     # 代理（可选）
     proxy_type: Optional[str] = None

@@ -14,6 +14,7 @@ from services.proxy import (
     import_from_parent_folder, import_from_folders,
     batch_check_status, list_accounts, delete_account,
     batch_update_profiles_gui, verify_account_spambot,
+    set_accounts_resting,
 )
 
 STATUS_COLORS = {
@@ -25,6 +26,7 @@ STATUS_COLORS = {
     "needs_2fa":   "#FF9800",
     "unknown":     "#9E9E9E",
     "error":       "#F44336",
+    "resting":     "#2196F3",
 }
 
 STATUS_LABELS = {
@@ -36,6 +38,7 @@ STATUS_LABELS = {
     "needs_2fa":   "需2FA",
     "unknown":     "未检测",
     "error":       "错误",
+    "resting":     "养号中",
 }
 
 
@@ -242,10 +245,17 @@ class AccountTab(QWidget):
         self.btn_profile        = QPushButton("批量改资料")
         self.btn_spambot        = QPushButton("SpamBot 申诉")
         self.btn_spambot.setToolTip("自动与 @SpamBot 交互，为选中账号提交申诉解除限制")
+        self.btn_set_resting    = QPushButton("标为养号中")
+        self.btn_set_resting.setToolTip("将选中账号标为养号中，不再参与任务分配")
+        self.btn_set_resting.setStyleSheet("color: #2196F3;")
+        self.btn_unrest         = QPushButton("解除养号")
+        self.btn_unrest.setToolTip("将选中养号中的账号恢复正常，可重新参与任务分配")
         self.btn_delete         = QPushButton("删除选中")
         self.btn_refresh        = QPushButton("刷新列表")
         for btn in [self.btn_check_selected, self.btn_check_all, self.btn_clean,
-                    self.btn_profile, self.btn_spambot, self.btn_delete, self.btn_refresh]:
+                    self.btn_profile, self.btn_spambot,
+                    self.btn_set_resting, self.btn_unrest,
+                    self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -273,6 +283,8 @@ class AccountTab(QWidget):
         self.btn_clean.clicked.connect(self._on_clean)
         self.btn_profile.clicked.connect(self._on_profile)
         self.btn_spambot.clicked.connect(self._on_spambot)
+        self.btn_set_resting.clicked.connect(lambda: self._on_set_resting(True))
+        self.btn_unrest.clicked.connect(lambda: self._on_set_resting(False))
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
 
@@ -295,9 +307,15 @@ class AccountTab(QWidget):
                 f"{acc.first_name or ''} {acc.last_name or ''}".strip()
             ))
 
-            status_text = STATUS_LABELS.get(acc.status, acc.status)
+            is_resting = getattr(acc, "is_resting", False)
+            if is_resting:
+                status_text = "养号中"
+                status_color = STATUS_COLORS["resting"]
+            else:
+                status_text = STATUS_LABELS.get(acc.status, acc.status)
+                status_color = STATUS_COLORS.get(acc.status, "#9E9E9E")
             status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(QColor(STATUS_COLORS.get(acc.status, "#9E9E9E")))
+            status_item.setForeground(QColor(status_color))
             self.table.setItem(row, 3, status_item)
 
             is_spammed = acc.spamblock and acc.spamblock.lower() not in ("free", "none", "ok", "")
@@ -518,6 +536,19 @@ class AccountTab(QWidget):
         self.btn_spambot.setEnabled(True)
         self.status_label.setText("SpamBot 申诉完成，请等待 Telegram 处理后重新验证账号状态")
         self._verify_log.append("\n✅ 所有账号申诉流程已完成。")
+
+    def _on_set_resting(self, resting: bool):
+        ids = self._get_selected_ids()
+        if not ids:
+            self.status_label.setText("请先选中账号行")
+            return
+        action = "标为养号中" if resting else "解除养号"
+        try:
+            set_accounts_resting(ids, resting)
+            self.status_label.setText(f"已{action} {len(ids)} 个账号")
+            self.refresh_table()
+        except Exception as e:
+            QMessageBox.critical(self, "操作失败", str(e))
 
     def _on_delete(self):
         ids = self._get_selected_ids()

@@ -205,6 +205,74 @@ def update_task_cron(task_id: int, cron_expr: str) -> Task:
         return task
 
 
+def batch_auto_reassign() -> dict:
+    """
+    一键换号：为所有停用任务分配空闲账号，将燃尽账号标记为养号中。
+    返回 {"reassigned": int, "rested": list[int], "no_accounts": bool}
+    """
+    from models.account import Account
+
+    with get_session() as db:
+        all_tasks = db.exec(select(Task)).all()
+        stopped_tasks = [t for t in all_tasks if not t.is_active]
+        active_tasks  = [t for t in all_tasks if t.is_active]
+
+        if not stopped_tasks:
+            return {"reassigned": 0, "rested": [], "no_accounts": False}
+
+        stopped_account_ids = set(t.account_id for t in stopped_tasks)
+        active_account_ids  = set(t.account_id for t in active_tasks)
+        to_rest = stopped_account_ids - active_account_ids  # 只养不再被活跃任务占用的账号
+
+        all_accounts = db.exec(select(Account)).all()
+        available = [a for a in all_accounts
+                     if not a.is_resting and a.id not in stopped_account_ids]
+
+        if not available:
+            return {"reassigned": 0, "rested": [], "no_accounts": True}
+
+        # 按当前活跃任务数排序，优先给任务少的账号
+        task_counts = {}
+        for t in active_tasks:
+            task_counts[t.account_id] = task_counts.get(t.account_id, 0) + 1
+        available_sorted = sorted(available, key=lambda a: task_counts.get(a.id, 0))
+
+        reassigned_tasks = []
+        for i, task in enumerate(stopped_tasks):
+            acc = available_sorted[i % len(available_sorted)]
+            history = json.loads(task.account_history or "[]")
+            history.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "account_id": acc.id,
+                "old_account_id": task.account_id,
+                "reason": "一键换号（账号燃尽）",
+            })
+            task.account_id = acc.id
+            task.account_history = json.dumps(history, ensure_ascii=False)
+            task.last_error = None
+            task.is_active = True
+            db.add(task)
+            task_counts[acc.id] = task_counts.get(acc.id, 0) + 1
+            reassigned_tasks.append(task)
+
+        # 标记燃尽账号为养号中
+        rested_ids = list(to_rest)
+        for aid in rested_ids:
+            acc = db.get(Account, aid)
+            if acc:
+                acc.is_resting = True
+                db.add(acc)
+
+        db.commit()
+
+    # 提交后重新注册调度器（需要在 session 关闭后操作避免 lazy-load 问题）
+    with get_session() as db:
+        for t in db.exec(select(Task).where(Task.is_active == True)).all():
+            scheduler.add_task(t.id, t.cron_expr, execute_task, timezone=t.timezone)
+
+    return {"reassigned": len(reassigned_tasks), "rested": rested_ids, "no_accounts": False}
+
+
 def restore_all_tasks():
     """
     程序启动时调用，将数据库中所有 is_active=True 的任务重新注册到调度器。

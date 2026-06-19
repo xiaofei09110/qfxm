@@ -28,6 +28,12 @@ def _migrate_db():
             conn.commit()
             logger.info("DB migration: added column tasks.account_history")
 
+        acc_cols = {row[1] for row in conn.execute(sqlalchemy.text("PRAGMA table_info(accounts)"))}
+        if "is_resting" not in acc_cols:
+            conn.execute(sqlalchemy.text("ALTER TABLE accounts ADD COLUMN is_resting INTEGER DEFAULT 0 NOT NULL"))
+            conn.commit()
+            logger.info("DB migration: added column accounts.is_resting")
+
 
 def get_session():
     return Session(engine)

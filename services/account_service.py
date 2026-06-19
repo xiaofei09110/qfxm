@@ -114,6 +114,16 @@ def list_accounts() -> List[Account]:
         return db.exec(select(Account)).all()
 
 
+def set_accounts_resting(account_ids: List[int], resting: bool = True):
+    with get_session() as db:
+        for aid in account_ids:
+            acc = db.get(Account, aid)
+            if acc:
+                acc.is_resting = resting
+                db.add(acc)
+        db.commit()
+
+
 def delete_account(account_id: int):
     import os
     client_manager.disconnect_account(account_id)

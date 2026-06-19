@@ -129,6 +129,14 @@ def batch_check_status(account_ids: List[int]) -> List[Tuple[int, str]]:
     return results
 
 
+def set_accounts_resting(account_ids: List[int], resting: bool = True):
+    _post("/accounts/resting", json={"account_ids": account_ids, "resting": resting})
+
+
+def batch_auto_reassign() -> dict:
+    return _post("/tasks/auto_reassign")
+
+
 def verify_account_spambot(account_id: int) -> str:
     data = _post(f"/accounts/{account_id}/verify")
     return data.get("message", "")

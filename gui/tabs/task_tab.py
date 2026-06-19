@@ -16,7 +16,7 @@ import json
 
 from services.proxy import (
     create_task, delete_task, toggle_task, list_tasks, list_groups,
-    list_accounts, switch_task_account, update_task_cron,
+    list_accounts, switch_task_account, update_task_cron, batch_auto_reassign,
 )
 from config import SERVER_URL
 
@@ -742,16 +742,22 @@ class TaskTab(QWidget):
         layout = QVBoxLayout(self)
 
         btn_row = QHBoxLayout()
-        self.btn_new        = QPushButton("新建任务")
-        self.btn_batch      = QPushButton("批量分配")
-        self.btn_toggle     = QPushButton("启用/停用")
-        self.btn_switch     = QPushButton("更换账号")
-        self.btn_reschedule = QPushButton("批量改时间")
-        self.btn_delete     = QPushButton("删除任务")
-        self.btn_refresh    = QPushButton("刷新")
+        self.btn_new         = QPushButton("新建任务")
+        self.btn_batch       = QPushButton("批量分配")
+        self.btn_toggle      = QPushButton("启用/停用")
+        self.btn_switch      = QPushButton("更换账号")
+        self.btn_reschedule  = QPushButton("批量改时间")
+        self.btn_auto_switch = QPushButton("一键换号")
+        self.btn_delete      = QPushButton("删除任务")
+        self.btn_refresh     = QPushButton("刷新")
         self.btn_batch.setStyleSheet("font-weight: bold;")
+        self.btn_auto_switch.setStyleSheet(
+            "background: #FF5722; color: white; font-weight: bold; padding: 4px 8px;"
+        )
+        self.btn_auto_switch.setToolTip("为所有停用任务自动分配空闲账号，将燃尽账号标为养号中")
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_reschedule, self.btn_delete, self.btn_refresh]:
+                    self.btn_switch, self.btn_reschedule, self.btn_auto_switch,
+                    self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -773,6 +779,7 @@ class TaskTab(QWidget):
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_switch.clicked.connect(self._on_switch)
         self.btn_reschedule.clicked.connect(self._on_reschedule)
+        self.btn_auto_switch.clicked.connect(self._on_auto_switch)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
         self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
@@ -824,7 +831,7 @@ class TaskTab(QWidget):
 
     def _set_buttons(self, enabled: bool):
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_reschedule, self.btn_delete]:
+                    self.btn_switch, self.btn_reschedule, self.btn_auto_switch, self.btn_delete]:
             btn.setEnabled(enabled)
 
     def _on_new(self):
@@ -1072,6 +1079,46 @@ class TaskTab(QWidget):
     def _on_switch_done(self, task):
         self._set_buttons(True)
         self.status_label.setText(f"账号已更换，任务 {task.name or task.id} 错误已清除")
+        self.refresh_table()
+
+    def _on_auto_switch(self):
+        stopped = [t for t in self._tasks.values() if not t.is_active]
+        if not stopped:
+            self.status_label.setText("没有停用的任务，无需换号")
+            return
+        reply = QMessageBox.question(
+            self, "一键换号",
+            f"发现 {len(stopped)} 个停用任务。\n\n"
+            "操作内容：\n"
+            "① 为每个停用任务分配一个空闲账号\n"
+            "② 将原来燃尽的账号标为「养号中」\n"
+            "③ 自动重新启用这些任务\n\n"
+            "确认执行？"
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._set_buttons(False)
+        self.status_label.setText("正在一键换号...")
+        self._auto_switch_worker = TaskWorker(batch_auto_reassign)
+        self._auto_switch_worker.finished.connect(self._on_auto_switch_done)
+        self._auto_switch_worker.error.connect(self._on_action_error)
+        self._auto_switch_worker.start()
+
+    def _on_auto_switch_done(self, result: dict):
+        self._set_buttons(True)
+        if result.get("no_accounts"):
+            QMessageBox.warning(
+                self, "无可用账号",
+                "没有空闲账号可分配！\n"
+                "请先在「账号管理」导入新账号，或解除部分账号的养号状态。"
+            )
+            self.status_label.setText("换号失败：无可用账号")
+            return
+        n = result.get("reassigned", 0)
+        r = len(result.get("rested", []))
+        self.status_label.setText(
+            f"一键换号完成：{n} 个任务已重新分配并启用，{r} 个燃尽账号已标为养号中"
+        )
         self.refresh_table()
 
     def _on_reschedule(self):
