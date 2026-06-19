@@ -21,6 +21,7 @@ from services.account_service import (
     check_account_status,
     delete_account,
     import_from_folders,
+    import_from_parent_folder,
     list_accounts,
     set_account_owner,
 )
@@ -72,35 +73,17 @@ async def upload_account(file: UploadFile = File(...), _=Depends(_auth)):
     - 旧格式：zip 内含 {phone}/ 子文件夹，每个子文件夹一个账号
     - 新格式（平铺）：zip 内直接含 {id}.session + {id}.json，无子文件夹
     """
-    from core.session_importer import import_flat_folder
     content = await file.read()
     tmpdir = tempfile.mkdtemp()
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             zf.extractall(tmpdir)
-
-        # 判断格式：有数字子文件夹 = 旧格式；.session 直接在根 = 新平铺格式
-        subfolders = [
-            os.path.join(tmpdir, name)
-            for name in os.listdir(tmpdir)
-            if os.path.isdir(os.path.join(tmpdir, name))
-        ]
-        has_sessions_in_root = any(
-            f.endswith(".session") and not f.endswith("-journal")
-            for f in os.listdir(tmpdir)
-            if os.path.isfile(os.path.join(tmpdir, f))
-        )
-
-        if has_sessions_in_root:
-            # 新平铺格式
-            results = import_flat_folder(tmpdir)
-        elif subfolders:
-            # 旧子文件夹格式
-            results = import_from_folders(subfolders)
-        else:
-            raise HTTPException(400, "zip 内未识别到账号文件（请确认包含 .session 文件）")
+        # import_from_parent_folder 自动识别平铺/子文件夹格式，并写入数据库
+        results = import_from_parent_folder(tmpdir)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+    if not results:
+        raise HTTPException(400, "zip 内未识别到账号文件（请确认包含 .session 文件）")
     return results
 
 
