@@ -19,6 +19,18 @@ from services.proxy import (
 )
 from gui.owner_filter import get_owner_filter, set_owner_filter
 
+# 每个归属分组的背景色（行底色, 分组文字颜色）
+_OWNER_PALETTE = [
+    ("#E3F2FD", "#1565C0"),  # 蓝
+    ("#E8F5E9", "#2E7D32"),  # 绿
+    ("#FFF3E0", "#E65100"),  # 橙
+    ("#FCE4EC", "#880E4F"),  # 粉
+    ("#F3E5F5", "#6A1B9A"),  # 紫
+    ("#E0F7FA", "#006064"),  # 青
+    ("#FFFDE7", "#F57F17"),  # 黄
+    ("#EFEBE9", "#4E342E"),  # 棕
+]
+
 STATUS_COLORS = {
     "active":      "#4CAF50",
     "restricted":  "#FF9800",
@@ -249,6 +261,7 @@ class AccountTab(QWidget):
     def __init__(self):
         super().__init__()
         self._accounts = []
+        self._pending_import_owner = ""   # 本次导入前选定的归属分组
         self._build_ui()
         self.refresh_table()
 
@@ -361,16 +374,42 @@ class AccountTab(QWidget):
         owner_filter = self.owner_filter_combo.currentData() or ""
         visible = [a for a in accounts if not owner_filter or getattr(a, "owner", "默认") == owner_filter]
 
+        # 无筛选时按归属分组排序，同组账号连续显示
+        if not owner_filter:
+            visible = sorted(visible, key=lambda a: getattr(a, "owner", "默认") or "默认")
+
+        # 为每个分组分配一个固定颜色（按分组名排序后依次取色板）
+        all_owners_sorted = sorted(owners)
+        owner_color_map = {
+            o: _OWNER_PALETTE[i % len(_OWNER_PALETTE)]
+            for i, o in enumerate(all_owners_sorted)
+        }
+
         self.table.setRowCount(len(visible))
         for row, acc in enumerate(visible):
-            self.table.setItem(row, 0, QTableWidgetItem(str(acc.id)))
-            self.table.setItem(row, 1, QTableWidgetItem(acc.phone or ""))
-            self.table.setItem(row, 2, QTableWidgetItem(
+            owner = getattr(acc, "owner", "默认") or "默认"
+            row_bg, owner_fg = owner_color_map.get(owner, ("#FFFFFF", "#333333"))
+            row_bg_color = QColor(row_bg)
+
+            def _item(text, fg=None):
+                it = QTableWidgetItem(str(text))
+                it.setBackground(row_bg_color)
+                if fg:
+                    it.setForeground(QColor(fg))
+                return it
+
+            self.table.setItem(row, 0, _item(acc.id))
+            self.table.setItem(row, 1, _item(acc.phone or ""))
+            self.table.setItem(row, 2, _item(
                 f"{acc.first_name or ''} {acc.last_name or ''}".strip()
             ))
 
-            owner = getattr(acc, "owner", "默认") or "默认"
-            self.table.setItem(row, 3, QTableWidgetItem(owner))
+            # 归属分组列：用分组专属文字色，加粗
+            owner_item = QTableWidgetItem(f"● {owner}")
+            owner_item.setBackground(row_bg_color)
+            owner_item.setForeground(QColor(owner_fg))
+            font = owner_item.font(); font.setBold(True); owner_item.setFont(font)
+            self.table.setItem(row, 3, owner_item)
 
             is_resting = getattr(acc, "is_resting", False)
             if is_resting:
@@ -379,30 +418,75 @@ class AccountTab(QWidget):
             else:
                 status_text = STATUS_LABELS.get(acc.status, acc.status)
                 status_color = STATUS_COLORS.get(acc.status, "#9E9E9E")
-            status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(QColor(status_color))
-            self.table.setItem(row, 4, status_item)
+            self.table.setItem(row, 4, _item(status_text, status_color))
 
             is_spammed = acc.spamblock and acc.spamblock.lower() not in ("free", "none", "ok", "")
-            spam_item = QTableWidgetItem("正常" if not is_spammed else acc.spamblock)
-            if is_spammed:
-                spam_item.setForeground(QColor("#F44336"))
-            self.table.setItem(row, 5, spam_item)
+            self.table.setItem(row, 5, _item(
+                "正常" if not is_spammed else acc.spamblock,
+                "#F44336" if is_spammed else None,
+            ))
 
-            self.table.setItem(row, 6, QTableWidgetItem("有" if acc.two_fa else "无"))
-            self.table.setItem(row, 7, QTableWidgetItem("是" if acc.is_premium else "否"))
+            self.table.setItem(row, 6, _item("有" if acc.two_fa else "无"))
+            self.table.setItem(row, 7, _item("是" if acc.is_premium else "否"))
             checked = acc.last_checked.strftime("%m-%d %H:%M") if acc.last_checked else "—"
-            self.table.setItem(row, 8, QTableWidgetItem(checked))
+            self.table.setItem(row, 8, _item(checked))
+
+        # 顶部状态栏显示分组概览
+        if not owner_filter and len(all_owners_sorted) > 1:
+            group_counts = {}
+            for a in visible:
+                o = getattr(a, "owner", "默认") or "默认"
+                group_counts[o] = group_counts.get(o, 0) + 1
+            summary = "  ".join(f"● {o}({n})" for o, n in
+                                sorted(group_counts.items()))
+            self.status_label.setText(f"分组概览：{summary}")
 
     def _set_import_buttons(self, enabled: bool):
         self.btn_import_folder.setEnabled(enabled)
         self.btn_import_single.setEnabled(enabled)
 
-    def _start_import(self, mode, path):
+    def _ask_import_owner(self) -> str:
+        """导入前弹窗询问归属分组，返回分组名（空字符串 = 跳过/使用默认）。"""
+        existing = sorted({getattr(a, "owner", "默认") or "默认" for a in self._accounts})
+        dlg = QDialog(self)
+        dlg.setWindowTitle("设置导入账号的归属分组")
+        dlg.setMinimumWidth(360)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel("为本批账号设置归属分组标签（可以是你的名字）："))
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItem("")
+        for o in existing:
+            if o != "默认":
+                combo.addItem(o)
+        combo.setPlaceholderText("输入新分组名，或从下方选择已有分组")
+        layout.addWidget(combo)
+
+        tip = QLabel("留空则归入「默认」分组，导入后也可以在表格中选中账号点「设置归属」修改。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(tip)
+
+        from PyQt5.QtWidgets import QDialogButtonBox
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("确认导入")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None  # 用户取消整个导入
+        return combo.currentText().strip()
+
+    def _start_import(self, mode, path, owner: str = ""):
+        self._pending_import_owner = owner
         self._set_import_buttons(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        self.status_label.setText("准备上传...")
+        owner_tip = f"（归属：{owner}）" if owner else ""
+        self.status_label.setText(f"准备上传...{owner_tip}")
         self._import_worker = ImportWorker(mode, path)
         self._import_worker.progress.connect(self._on_import_progress)
         self._import_worker.finished.connect(self._on_import_done)
@@ -417,7 +501,10 @@ class AccountTab(QWidget):
         parent = QFileDialog.getExistingDirectory(self, "选择协议号父文件夹")
         if not parent:
             return
-        self._start_import("folder", parent)
+        owner = self._ask_import_owner()
+        if owner is None:
+            return  # 用户在询问归属时取消
+        self._start_import("folder", parent, owner)
 
     def _on_import_single(self):
         folders = []
@@ -430,11 +517,27 @@ class AccountTab(QWidget):
             folders.append(folder)
         if not folders:
             return
-        self._start_import("folders", folders)
+        owner = self._ask_import_owner()
+        if owner is None:
+            return
+        self._start_import("folders", folders, owner)
 
     def _on_import_done(self, results):
         self.progress_bar.setVisible(False)
         self._set_import_buttons(True)
+
+        # 为本批新导入的账号设置归属分组
+        owner = self._pending_import_owner
+        if owner:
+            new_ids = [r["account_id"] for r in results
+                       if r.get("status") == "ok" and "account_id" in r]
+            if new_ids:
+                try:
+                    set_account_owner(new_ids, owner)
+                except Exception:
+                    pass  # 设置失败不影响导入结果展示
+        self._pending_import_owner = ""
+
         self._show_import_result(results)
 
     def _show_import_result(self, results):
