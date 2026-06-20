@@ -1240,28 +1240,57 @@ class TaskTab(QWidget):
             self.status_label.setText("没有停用的任务，无需换号")
             return
 
-        # 按归属分组汇总，让用户知道各组各有几个停用任务
         by_owner = {}
         for t in stopped:
             o = getattr(t, "owner", "默认") or "默认"
             by_owner[o] = by_owner.get(o, 0) + 1
         owner_summary = "\n".join(f"  • {o}：{n} 个任务" for o, n in sorted(by_owner.items()))
 
-        reply = QMessageBox.question(
-            self, "一键换号",
-            f"发现 {len(stopped)} 个停用任务，将按各自归属分组分配空闲账号：\n{owner_summary}\n\n"
-            "系统保证每个任务只会被分配到同一归属分组的账号，不会跨组。\n\n"
-            "操作内容：\n"
-            "① 按归属分组为每个停用任务分配空闲账号\n"
+        dlg = QDialog(self)
+        dlg.setWindowTitle("一键换号")
+        dlg.setMinimumWidth(420)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel(
+            f"发现 {len(stopped)} 个停用任务：\n{owner_summary}"
+        ))
+
+        layout.addWidget(QLabel("\n选择使用哪个分组的账号来替换："))
+        combo = QComboBox()
+        combo.addItem("按任务自身归属分组（不跨组）", "")
+        try:
+            all_accs = list_accounts()
+            all_owners = sorted({getattr(a, "owner", "默认") or "默认" for a in all_accs})
+        except Exception:
+            all_owners = sorted(by_owner.keys())
+        for o in all_owners:
+            combo.addItem(f"统一使用「{o}」分组的账号", o)
+        layout.addWidget(combo)
+
+        tip = QLabel(
+            "\n操作内容：\n"
+            "① 为每个停用任务分配所选分组内的空闲账号\n"
             "② 将原来燃尽的账号标为「养号中」\n"
-            "③ 自动重新启用这些任务\n\n"
-            "确认执行？"
+            "③ 自动重新启用这些任务"
         )
-        if reply != QMessageBox.Yes:
+        tip.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(tip)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("执行换号")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QDialog.Accepted:
             return
+
+        target_owner = combo.currentData() or ""
         self._set_buttons(False)
         self.status_label.setText("正在一键换号...")
-        self._auto_switch_worker = TaskWorker(batch_auto_reassign)
+        self._auto_switch_worker = TaskWorker(
+            batch_auto_reassign, target_owner=target_owner)
         self._auto_switch_worker.finished.connect(self._on_auto_switch_done)
         self._auto_switch_worker.error.connect(self._on_action_error)
         self._auto_switch_worker.start()

@@ -237,11 +237,11 @@ def update_task_cron(task_id: int, cron_expr: str) -> Task:
         return task
 
 
-def batch_auto_reassign() -> dict:
+def batch_auto_reassign(target_owner: str = "") -> dict:
     """
-    一键换号：按每个任务自身的 owner 归属分组分配账号，严格隔离不同分组的账号池。
-    - 每个任务只会被分配到与自己 owner 相同的账号，绝不跨组。
-    - 若某个任务所属分组内无可用账号，该任务跳过（skipped 列表）。
+    一键换号：为停用任务分配空闲账号。
+    - target_owner 非空时：所有停用任务统一从该分组取账号（用户主动选择跨组）。
+    - target_owner 为空时：按每个任务自身 owner 分组取账号，严格隔离。
     返回 {"reassigned": int, "rested": list[int], "skipped": list[int], "no_accounts": bool}
     """
     from models.account import Account
@@ -295,11 +295,10 @@ def batch_auto_reassign() -> dict:
         skipped    = []
 
         for task in stopped_tasks:
-            task_owner = task.owner or "默认"
+            task_owner = target_owner or task.owner or "默认"
             owner_pool = pool_by_owner.get(task_owner, [])
 
             if not owner_pool:
-                # 该分组内没有可用账号，跳过，不跨组
                 skipped.append(task.id)
                 logger.warning("一键换号：任务 %d (owner=%s) 无可用账号，跳过", task.id, task_owner)
                 continue

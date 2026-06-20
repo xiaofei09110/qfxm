@@ -160,8 +160,8 @@ def set_account_owner(account_ids: List[int], owner: str):
     _post("/accounts/owner", json={"account_ids": account_ids, "owner": owner})
 
 
-def batch_auto_reassign() -> dict:
-    return _post("/tasks/auto_reassign")
+def batch_auto_reassign(target_owner: str = "") -> dict:
+    return _post("/tasks/auto_reassign", json={"target_owner": target_owner})
 
 
 def verify_account_spambot(account_id: int) -> str:

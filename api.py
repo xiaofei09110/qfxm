@@ -123,10 +123,14 @@ def set_owner_ep(req: OwnerRequest, _=Depends(_auth)):
     return {"ok": True}
 
 
+class AutoReassignRequest(BaseModel):
+    target_owner: str = ""
+
+
 @app.post("/tasks/auto_reassign")
-def auto_reassign_ep(_=Depends(_auth)):
+def auto_reassign_ep(req: AutoReassignRequest = AutoReassignRequest(), _=Depends(_auth)):
     from services.group_service import batch_auto_reassign
-    return batch_auto_reassign()
+    return batch_auto_reassign(target_owner=req.target_owner)
 
 
 @app.post("/accounts/{account_id}/verify")
