@@ -279,6 +279,11 @@ def update_task_cron(task_id: int, cron_expr: str) -> SimpleNamespace:
     return _task(data)
 
 
+def update_task_message(task_id: int, message_text: str) -> SimpleNamespace:
+    data = _put(f"/tasks/{task_id}/message", json={"message_text": message_text})
+    return _task(data)
+
+
 def delete_task(task_id: int):
     _delete(f"/tasks/{task_id}")
 

@@ -16,7 +16,8 @@ import json
 
 from services.proxy import (
     create_task, delete_task, toggle_task, list_tasks, list_groups,
-    list_accounts, switch_task_account, update_task_cron, batch_auto_reassign,
+    list_accounts, switch_task_account, update_task_cron, update_task_message,
+    batch_auto_reassign,
 )
 from gui.owner_filter import get_owner_filter
 from config import SERVER_URL
@@ -823,6 +824,7 @@ class TaskTab(QWidget):
         self.btn_toggle      = QPushButton("启用/停用")
         self.btn_switch      = QPushButton("更换账号")
         self.btn_reschedule  = QPushButton("批量改时间")
+        self.btn_edit_msg    = QPushButton("批量改内容")
         self.btn_auto_switch = QPushButton("一键换号")
         self.btn_delete      = QPushButton("删除任务")
         self.btn_refresh     = QPushButton("刷新")
@@ -832,8 +834,8 @@ class TaskTab(QWidget):
         )
         self.btn_auto_switch.setToolTip("为所有停用任务自动分配空闲账号，将燃尽账号标为养号中")
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_reschedule, self.btn_auto_switch,
-                    self.btn_delete, self.btn_refresh]:
+                    self.btn_switch, self.btn_reschedule, self.btn_edit_msg,
+                    self.btn_auto_switch, self.btn_delete, self.btn_refresh]:
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -871,6 +873,7 @@ class TaskTab(QWidget):
         self.btn_toggle.clicked.connect(self._on_toggle)
         self.btn_switch.clicked.connect(self._on_switch)
         self.btn_reschedule.clicked.connect(self._on_reschedule)
+        self.btn_edit_msg.clicked.connect(self._on_edit_message)
         self.btn_auto_switch.clicked.connect(self._on_auto_switch)
         self.btn_delete.clicked.connect(self._on_delete)
         self.btn_refresh.clicked.connect(self.refresh_table)
@@ -882,11 +885,19 @@ class TaskTab(QWidget):
     def refresh_table(self):
         if hasattr(self, '_refresh_worker') and self._refresh_worker.isRunning():
             return
+        self.status_label.setText("正在刷新...")
         worker = RefreshWorker()
-        worker.finished.connect(self._populate_table)
+        worker.finished.connect(self._on_refresh_done)
         worker.error.connect(lambda e: self.status_label.setText(f"刷新失败: {e}"))
         self._refresh_worker = worker
         worker.start()
+
+    def _on_refresh_done(self, tasks):
+        from datetime import datetime
+        self._populate_table(tasks)
+        active = sum(1 for t in tasks if t.is_active)
+        now = datetime.now().strftime("%H:%M:%S")
+        self.status_label.setText(f"刷新完成（{now}）：共 {len(tasks)} 个任务，{active} 个启用中")
 
     def _populate_table(self, tasks):
         self._tasks = {t.id: t for t in tasks}
@@ -952,7 +963,8 @@ class TaskTab(QWidget):
 
     def _set_buttons(self, enabled: bool):
         for btn in [self.btn_new, self.btn_batch, self.btn_toggle,
-                    self.btn_switch, self.btn_reschedule, self.btn_auto_switch, self.btn_delete]:
+                    self.btn_switch, self.btn_reschedule, self.btn_edit_msg,
+                    self.btn_auto_switch, self.btn_delete]:
             btn.setEnabled(enabled)
 
     def _on_new(self):
@@ -1337,6 +1349,56 @@ class TaskTab(QWidget):
     def _on_reschedule_done(self, success, fail):
         self._set_buttons(True)
         msg = f"修改完成：成功 {success} 个"
+        if fail:
+            msg += f"，失败 {fail} 个"
+        self.status_label.setText(msg)
+        self.refresh_table()
+
+    def _on_edit_message(self):
+        ids = self._get_selected_ids()
+        if not ids:
+            self.status_label.setText("请先选中要修改的任务行")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"批量修改 {len(ids)} 个任务的消息内容")
+        dlg.setMinimumSize(500, 350)
+        layout = QVBoxLayout(dlg)
+
+        layout.addWidget(QLabel(f"为选中的 {len(ids)} 个任务设置新的消息内容："))
+        text_edit = QTextEdit()
+        if len(ids) == 1:
+            task = self._tasks.get(ids[0])
+            if task:
+                text_edit.setPlainText(getattr(task, "message_text", ""))
+        text_edit.setPlaceholderText("输入新的消息内容...")
+        layout.addWidget(text_edit)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("确认修改")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        new_text = text_edit.toPlainText().strip()
+        if not new_text:
+            QMessageBox.warning(self, "提示", "消息内容不能为空")
+            return
+
+        self._set_buttons(False)
+        self.status_label.setText(f"正在修改 {len(ids)} 个任务的消息内容...")
+        success = fail = 0
+        for tid in ids:
+            try:
+                update_task_message(tid, new_text)
+                success += 1
+            except Exception:
+                fail += 1
+        self._set_buttons(True)
+        msg = f"消息内容修改完成：成功 {success} 个"
         if fail:
             msg += f"，失败 {fail} 个"
         self.status_label.setText(msg)

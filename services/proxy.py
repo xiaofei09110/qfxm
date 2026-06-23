@@ -32,6 +32,7 @@ if IS_REMOTE:
         delete_task,
         switch_task_account,
         update_task_cron,
+        update_task_message,
         batch_update_profiles_remote,
         update_single_profile,
     )
@@ -64,6 +65,7 @@ else:
         delete_task,
         switch_task_account,
         update_task_cron,
+        update_task_message,
         resolve_group_info,
     )
 

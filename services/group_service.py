@@ -237,6 +237,19 @@ def update_task_cron(task_id: int, cron_expr: str) -> Task:
         return task
 
 
+def update_task_message(task_id: int, message_text: str) -> Task:
+    """修改任务的消息内容。"""
+    with get_session() as db:
+        task = db.get(Task, task_id)
+        if not task:
+            raise ValueError(f"任务 {task_id} 不存在")
+        task.message_text = message_text
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return task
+
+
 def batch_auto_reassign(target_owner: str = "") -> dict:
     """
     一键换号：为停用任务分配空闲账号。

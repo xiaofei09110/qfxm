@@ -394,6 +394,17 @@ def update_cron_ep(task_id: int, req: UpdateCronRequest, _=Depends(_auth)):
     return d
 
 
+class UpdateMessageRequest(BaseModel):
+    message_text: str
+
+
+@app.put("/tasks/{task_id}/message")
+def update_message_ep(task_id: int, req: UpdateMessageRequest, _=Depends(_auth)):
+    from services.group_service import update_task_message
+    task = update_task_message(task_id, req.message_text)
+    return jsonable_encoder(task)
+
+
 @app.delete("/tasks/{task_id}")
 def remove_task(task_id: int, _=Depends(_auth)):
     delete_task(task_id)
