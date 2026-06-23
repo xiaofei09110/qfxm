@@ -187,6 +187,43 @@ def update_profiles(req: ProfileRequest, _=Depends(_auth)):
     return {"results": {str(k): v for k, v in results.items()}}
 
 
+class SingleProfileRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
+    photo_path: Optional[str] = None
+
+
+@app.post("/accounts/{account_id}/profile")
+def update_single_profile(account_id: int, req: SingleProfileRequest, _=Depends(_auth)):
+    """单个账号修改资料，自动连接未连接的账号。"""
+    from database import get_session
+    from models.account import Account
+    from core.client_manager import client_manager, run_async
+    from core.profile_manager import update_name, update_bio, update_photo
+
+    client = client_manager.get_client(account_id)
+    if not client:
+        with get_session() as db:
+            account = db.get(Account, account_id)
+            if not account:
+                raise HTTPException(404, "账号不存在")
+            client, status, _ = client_manager.connect_account(account)
+        if not client or status != "active":
+            return {"ok": False, "error": status or "连接失败"}
+
+    res = {}
+    if req.first_name is not None:
+        res["name"] = run_async(update_name(client, req.first_name, req.last_name or ""))
+    if req.bio is not None:
+        res["bio"] = run_async(update_bio(client, req.bio))
+    if req.photo_path is not None:
+        res["photo"] = run_async(update_photo(client, req.photo_path))
+
+    ok = all(v for v in res.values()) if res else False
+    return {"ok": ok, "detail": res}
+
+
 @app.post("/upload/media")
 async def upload_media(file: UploadFile = File(...), _=Depends(_auth)):
     """上传头像等媒体文件到服务端，返回服务端路径供后续 profile 接口使用。"""

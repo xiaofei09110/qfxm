@@ -33,6 +33,7 @@ if IS_REMOTE:
         switch_task_account,
         update_task_cron,
         batch_update_profiles_remote,
+        update_single_profile,
     )
 
     def batch_update_profiles_gui(selected_ids: list, **vals) -> dict:

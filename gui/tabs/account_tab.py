@@ -15,7 +15,7 @@ from services.proxy import (
     import_from_parent_folder, import_from_folders,
     batch_check_status, list_accounts, delete_account,
     batch_update_profiles_gui, verify_account_spambot,
-    set_accounts_resting, set_account_owner,
+    set_accounts_resting, set_account_owner, update_single_profile,
 )
 from gui.owner_filter import get_owner_filter, set_owner_filter
 
@@ -197,20 +197,33 @@ class DeleteWorker(QThread):
 
 
 class ProfileWorker(QThread):
+    progress = pyqtSignal(int, int, str)  # current, total, status_text
     finished = pyqtSignal(dict)
     error    = pyqtSignal(str)
 
-    def __init__(self, selected_ids, vals):
+    def __init__(self, selected_ids, vals, server_photo=None):
         super().__init__()
         self.selected_ids = selected_ids
         self.vals = vals
+        self.server_photo = server_photo
 
     def run(self):
-        try:
-            results = batch_update_profiles_gui(self.selected_ids, **self.vals)
-            self.finished.emit(results or {})
-        except Exception as e:
-            self.error.emit(str(e))
+        results = {}
+        total = len(self.selected_ids)
+        for i, aid in enumerate(self.selected_ids, 1):
+            self.progress.emit(i, total, f"正在修改账号 {aid}（自动连接+改资料）")
+            try:
+                resp = update_single_profile(
+                    aid,
+                    first_name=self.vals.get("first_name"),
+                    last_name=self.vals.get("last_name"),
+                    bio=self.vals.get("bio"),
+                    photo_path=self.server_photo,
+                )
+                results[str(aid)] = resp.get("ok", False)
+            except Exception as e:
+                results[str(aid)] = False
+        self.finished.emit(results)
 
 
 class VerifyWorker(QThread):
@@ -684,23 +697,53 @@ class AccountTab(QWidget):
         if not any(vals.values()):
             QMessageBox.information(self, "提示", "没有填写任何修改内容")
             return
+
+        server_photo = None
+        if vals.get("photo_path"):
+            try:
+                from api_client import _h
+                from config import SERVER_URL
+                import requests as _req
+                with open(vals["photo_path"], "rb") as f:
+                    r = _req.post(
+                        f"{SERVER_URL}/upload/media", headers=_h(),
+                        files={"file": (vals["photo_path"].split("\\")[-1].split("/")[-1], f)},
+                        timeout=60)
+                    r.raise_for_status()
+                    server_photo = r.json()["path"]
+            except Exception as e:
+                QMessageBox.critical(self, "上传头像失败", str(e))
+                return
+
         self.btn_profile.setEnabled(False)
-        self.status_label.setText("正在修改资料，请稍候...")
-        self._profile_worker = ProfileWorker(selected_ids, vals)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(len(selected_ids))
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("正在修改资料...")
+
+        self._profile_worker = ProfileWorker(selected_ids, vals, server_photo)
+        self._profile_worker.progress.connect(self._on_profile_progress)
         self._profile_worker.finished.connect(lambda r: self._on_profile_done(r, len(selected_ids)))
         self._profile_worker.error.connect(lambda e: (
             QMessageBox.critical(self, "修改失败", e),
             self.btn_profile.setEnabled(True),
+            self.progress_bar.setVisible(False),
         ))
         self._profile_worker.start()
 
+    def _on_profile_progress(self, current, total, text):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.status_label.setText(f"修改资料 {current}/{total}：{text}")
+
     def _on_profile_done(self, results, total):
         self.btn_profile.setEnabled(True)
+        self.progress_bar.setVisible(False)
         if not results:
-            QMessageBox.warning(self, "提示", "选中账号均未连接，请先点「验证账号」")
+            QMessageBox.warning(self, "提示", "没有成功修改任何账号")
             return
         success = sum(1 for v in results.values() if v)
-        self.status_label.setText(f"资料修改：{success}/{total} 个成功")
+        self.status_label.setText(f"资料修改完成：{success}/{total} 个成功，{total - success} 个失败")
 
     def _on_spambot(self):
         ids = self._get_selected_ids()

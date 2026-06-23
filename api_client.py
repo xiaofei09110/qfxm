@@ -204,6 +204,18 @@ def batch_update_profiles_remote(
     return data.get("results", {})
 
 
+def update_single_profile(account_id: int,
+                          first_name=None, last_name=None,
+                          bio=None, photo_path=None) -> dict:
+    """单个账号修改资料（自动连接），photo_path 为服务端路径。"""
+    return _post(f"/accounts/{account_id}/profile", json={
+        "first_name": first_name,
+        "last_name": last_name,
+        "bio": bio,
+        "photo_path": photo_path,
+    }, timeout=120)
+
+
 # ── 群组 ──────────────────────────────────────────────────────────────
 
 def list_groups() -> List[SimpleNamespace]:
