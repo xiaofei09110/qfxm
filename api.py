@@ -184,6 +184,23 @@ def update_profiles(req: ProfileRequest, _=Depends(_auth)):
         ),
         timeout=300,
     )
+
+    if req.first_name is not None or req.last_name is not None:
+        from database import get_session
+        from models.account import Account
+        with get_session() as db:
+            for aid, detail in results.items():
+                if detail.get("name"):
+                    account = db.get(Account, aid)
+                    if account:
+                        if req.first_name is not None:
+                            account.first_name = req.first_name
+                            account.name = req.first_name
+                        if req.last_name is not None:
+                            account.last_name = req.last_name
+                        db.add(account)
+            db.commit()
+
     return {"results": {str(k): v for k, v in results.items()}}
 
 
@@ -221,6 +238,19 @@ def update_single_profile(account_id: int, req: SingleProfileRequest, _=Depends(
         res["photo"] = run_async(update_photo(client, req.photo_path))
 
     ok = all(v for v in res.values()) if res else False
+
+    if ok:
+        with get_session() as db:
+            account = db.get(Account, account_id)
+            if account:
+                if req.first_name is not None:
+                    account.first_name = req.first_name
+                    account.name = req.first_name
+                if req.last_name is not None:
+                    account.last_name = req.last_name
+                db.add(account)
+                db.commit()
+
     return {"ok": ok, "detail": res}
 
 
